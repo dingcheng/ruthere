@@ -20,12 +20,23 @@ You can verify E2E encryption by opening your browser's Network tab — no plain
 ### Heartbeat Schedule
 
 - Configurable interval (e.g., every 4 hours, daily, weekly)
-- Active hours window — heartbeats only sent during your specified hours in your timezone (e.g., 8 AM – 10 PM)
+- Active hours window — heartbeats only sent during your specified hours in your timezone (e.g., 8 AM - 10 PM)
 - Heartbeats that land outside your active window are pushed to the next window, not counted as missed
 - Notification tier: ntfy push first, email fallback
 - Escalation: if you miss a push notification, the system escalates to email before counting it as a miss
 - Configurable miss threshold (default: 3 consecutive misses before trigger)
 - All scheduling is persisted to the database and survives server restarts
+
+### Trigger Simulation
+
+A built-in simulation wizard lets you test the entire trigger sequence step by step without affecting your real heartbeat state:
+
+1. **Send Heartbeat** — sends a real ntfy push + email so you can test the notification flow
+2. **Escalate** — simulates the response window expiring and sends an escalation email
+3. **Miss** — marks the heartbeat as missed (simulation-only counter, not your real miss count)
+4. **Fire Trigger** — delivers secrets to a test email you specify (never to real recipients)
+
+Simulation data is fully isolated: it doesn't appear on the dashboard, doesn't affect your consecutive miss counter, and doesn't deactivate your heartbeat. All simulation emails are clearly labeled `[SIMULATION]`.
 
 ## Tech Stack
 
@@ -39,7 +50,9 @@ You can verify E2E encryption by opening your browser's Network tab — no plain
 | Push notifications | ntfy.sh (free, no account required) |
 | Email | Resend API |
 | Scheduling | APScheduler (async, in-process) |
+| HTTP client | httpx with shared connection pooling |
 | Deployment | Docker Compose + Cloudflare Tunnel |
+| Tests | pytest + pytest-asyncio (122 tests) |
 
 ## Self-Hosting Guide
 
@@ -92,7 +105,7 @@ mkdir -p data
 
 1. Add your domain to [Cloudflare](https://dash.cloudflare.com) (free plan)
 2. Update your domain's nameservers to Cloudflare's (at your registrar)
-3. Go to **Cloudflare Zero Trust** → **Networks** → **Tunnels** → **Create a tunnel**
+3. Go to **Cloudflare Zero Trust** > **Networks** > **Tunnels** > **Create a tunnel**
 4. Copy the tunnel token into your `.env` as `TUNNEL_TOKEN`
 5. Add a **Public Hostname** in the tunnel config:
    - Subdomain: `ruthere` (or whatever you prefer)
@@ -134,10 +147,17 @@ curl https://ruthere.yourdomain.com/health
 
 ### 8. Add secrets and recipients
 
-1. Go to **Secrets** → **Add New Secret**
+1. Go to **Secrets** > **Add New Secret**
 2. Choose encryption type (server or E2E) and save
-3. Go to **Recipients** → **Add Recipient** and link them to a secret
+3. Go to **Recipients** > **Add Recipient** and link them to a secret
 4. For E2E secrets: share the passphrase with your recipient in person or by phone
+
+### 9. Test the trigger flow
+
+1. Go to **Simulate** in the nav bar
+2. Walk through the 4-step wizard to verify notifications, escalation, and secret delivery
+3. Use your own email as the test target — real recipients are never contacted during simulation
+4. Click **Reset** when done
 
 ## Common Commands
 
@@ -156,6 +176,9 @@ docker compose up -d --build
 
 # Restart (e.g., after editing .env)
 docker compose restart app
+
+# Run tests
+python -m pytest tests/ -v
 ```
 
 ## Running Without Docker (Development)
@@ -186,17 +209,30 @@ ruthere/
 │   │   ├── secrets.py        # CRUD + reveal endpoint for E2E secrets
 │   │   ├── recipients.py     # CRUD + invite emails
 │   │   ├── heartbeat.py      # Respond, status, settings, history, test
+│   │   ├── simulate.py       # Step-by-step trigger simulation (fully isolated)
 │   │   └── web.py            # Server-rendered HTML pages
 │   ├── services/
 │   │   ├── auth.py           # bcrypt + JWT
 │   │   ├── vault.py          # AES-256-GCM server-side encryption
-│   │   ├── notify.py         # ntfy.sh push + Resend email + iMessage
+│   │   ├── notify.py         # ntfy.sh push + Resend email (shared httpx client)
 │   │   ├── scheduler.py      # Heartbeat dispatcher, escalation checker, log cleanup
-│   │   └── trigger.py        # Dead man's switch execution
+│   │   └── trigger.py        # Dead man's switch execution (server + E2E paths)
 │   └── static/
 │       └── js/e2e.js         # Client-side PBKDF2 + AES-256-GCM (Web Crypto API)
+├── tests/                    # 122 tests across 8 files
+│   ├── conftest.py           # Fixtures: async client, in-memory DB, test user
+│   ├── test_vault.py         # Encryption round-trip, tamper detection
+│   ├── test_auth.py          # Register, login, JWT, password hashing
+│   ├── test_secrets.py       # Server + E2E CRUD, cross-user isolation
+│   ├── test_recipients.py    # CRUD, linked secret validation
+│   ├── test_heartbeat.py     # Respond, settings, history, scheduling
+│   ├── test_scheduler.py     # Active hours, next heartbeat computation
+│   ├── test_trigger.py       # Server + E2E trigger, reveal tokens
+│   ├── test_simulate.py      # Simulation isolation, flow, dashboard exclusion
+│   └── test_web.py           # Page rendering, auth redirects
 ├── docker-compose.yml
 ├── Dockerfile
+├── pyproject.toml            # pytest config
 ├── requirements.txt
 └── .env.example
 ```
