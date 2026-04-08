@@ -1,0 +1,36 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Database
+sqlalchemy>=2.0.40
+alembic==1.14.0
+aiosqlite==0.20.0
+greenlet>=3.0.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+bcrypt>=4.0.0
+python-multipart==0.0.18
+
+# Encryption
+cryptography==44.0.0
+
+# Scheduling
+apscheduler==3.10.4
+
+# HTTP client (for ntfy + Resend)
+httpx==0.28.1
+
+# Templating
+jinja2==3.1.4
+
+# Settings
+pydantic-settings==2.7.0
+
+# Validation
+email-validator>=2.0.0
+
+# Dev
+pytest==8.3.4
+pytest-asyncio==0.24.0
