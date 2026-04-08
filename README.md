@@ -38,6 +38,15 @@ A built-in simulation wizard lets you test the entire trigger sequence step by s
 
 Simulation data is fully isolated: it doesn't appear on the dashboard, doesn't affect your consecutive miss counter, and doesn't deactivate your heartbeat. All simulation emails are clearly labeled `[SIMULATION]`.
 
+### Internationalization
+
+The UI supports multiple languages. Currently available:
+
+- **English** (default)
+- **中文** (Chinese Simplified)
+
+Language is selectable per user in Settings > Profile. All page content, form labels, status badges, error messages, and email templates are translated. Adding a new language requires creating a single translation file — see `app/i18n/` for the structure.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -51,6 +60,7 @@ Simulation data is fully isolated: it doesn't appear on the dashboard, doesn't a
 | Email | Resend API |
 | Scheduling | APScheduler (async, in-process) |
 | HTTP client | httpx with shared connection pooling |
+| i18n | Lightweight built-in module (no external dependencies) |
 | Deployment | Docker Compose + Cloudflare Tunnel |
 | Tests | pytest + pytest-asyncio (122 tests) |
 
@@ -136,7 +146,7 @@ curl https://ruthere.yourdomain.com/health
 
 1. Open `https://ruthere.yourdomain.com` in your browser
 2. Click **Register** and create an account
-3. Go to **Settings** to configure your heartbeat interval, timezone, and active hours
+3. Go to **Settings** to configure your heartbeat interval, timezone, active hours, and language
 
 ### 7. Set up ntfy notifications
 
@@ -194,6 +204,30 @@ uvicorn app.main:app --reload
 # Open http://localhost:8000
 ```
 
+## Adding a New Language
+
+1. Copy `app/i18n/lang_en.py` to `app/i18n/lang_XX.py`
+2. Translate all string values in the `TRANSLATIONS` dict
+3. Register the new language in `app/i18n/__init__.py`:
+
+```python
+from app.i18n.lang_XX import TRANSLATIONS as XX
+
+LANGUAGES = {
+    "en": EN,
+    "zh": ZH,
+    "xx": XX,  # add this
+}
+
+SUPPORTED_LANGUAGES = [
+    ("en", "English"),
+    ("zh", "中文"),
+    ("xx", "Your Language"),  # add this
+]
+```
+
+4. Rebuild and deploy
+
 ## Project Structure
 
 ```
@@ -205,18 +239,22 @@ ruthere/
 │   ├── models/
 │   │   └── models.py         # User, Secret, Recipient, HeartbeatLog, TriggerLog, RevealToken
 │   ├── api/
-│   │   ├── auth.py           # Register, login, profile
+│   │   ├── auth.py           # Register, login, profile (includes language preference)
 │   │   ├── secrets.py        # CRUD + reveal endpoint for E2E secrets
 │   │   ├── recipients.py     # CRUD + invite emails
 │   │   ├── heartbeat.py      # Respond, status, settings, history, test
 │   │   ├── simulate.py       # Step-by-step trigger simulation (fully isolated)
-│   │   └── web.py            # Server-rendered HTML pages
+│   │   └── web.py            # Server-rendered HTML pages (i18n-enabled)
 │   ├── services/
 │   │   ├── auth.py           # bcrypt + JWT
 │   │   ├── vault.py          # AES-256-GCM server-side encryption
 │   │   ├── notify.py         # ntfy.sh push + Resend email (shared httpx client)
 │   │   ├── scheduler.py      # Heartbeat dispatcher, escalation checker, log cleanup
 │   │   └── trigger.py        # Dead man's switch execution (server + E2E paths)
+│   ├── i18n/                 # Internationalization
+│   │   ├── __init__.py       # t() lookup function, language registry
+│   │   ├── lang_en.py        # English translations (base)
+│   │   └── lang_zh.py        # Chinese Simplified translations
 │   └── static/
 │       └── js/e2e.js         # Client-side PBKDF2 + AES-256-GCM (Web Crypto API)
 ├── tests/                    # 122 tests across 8 files
