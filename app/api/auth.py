@@ -89,12 +89,14 @@ async def logout(response: Response):
 
 class ProfileUpdate(BaseModel):
     display_name: str | None = None
+    language: str | None = None
 
 
 class ProfileResponse(BaseModel):
     user_id: str
     email: str
     display_name: str | None
+    language: str
 
 
 @router.get("/profile", response_model=ProfileResponse)
@@ -103,6 +105,7 @@ async def get_profile(user: User = Depends(get_current_user)):
         user_id=user.id,
         email=user.email,
         display_name=user.display_name,
+        language=user.language or "en",
     )
 
 
@@ -115,10 +118,16 @@ async def update_profile(
     if body.display_name is not None:
         user.display_name = body.display_name.strip() or None
 
+    if body.language is not None:
+        from app.i18n import LANGUAGES
+        if body.language in LANGUAGES:
+            user.language = body.language
+
     await db.flush()
 
     return ProfileResponse(
         user_id=user.id,
         email=user.email,
         display_name=user.display_name,
+        language=user.language or "en",
     )

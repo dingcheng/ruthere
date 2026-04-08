@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.models import User, HeartbeatLog
 from app.services.auth import get_current_user
+from app.i18n import t
 from app.services.scheduler import compute_next_heartbeat
 
 router = APIRouter(tags=["heartbeat"])
@@ -51,27 +52,35 @@ class HeartbeatLogResponse(BaseModel):
 # --- Public endpoint: one-click heartbeat response ---
 
 @router.api_route("/heartbeat/respond/{token}", methods=["GET", "POST"], response_class=HTMLResponse)
-async def respond_to_heartbeat(token: str, db: AsyncSession = Depends(get_db)):
+async def respond_to_heartbeat(token: str, request: Request, db: AsyncSession = Depends(get_db)):
     """One-click heartbeat response. User taps a link to confirm they're alive."""
     result = await db.execute(
         select(HeartbeatLog).where(HeartbeatLog.response_token == token)
     )
     heartbeat = result.scalar_one_or_none()
 
+    # Detect language from user preference or query param
+    lang = request.query_params.get("lang", "en")
+    if heartbeat:
+        user_result = await db.execute(select(User).where(User.id == heartbeat.user_id))
+        hb_user = user_result.scalar_one_or_none()
+        if hb_user:
+            lang = hb_user.language or "en"
+
     if not heartbeat:
         return HTMLResponse(
-            content=_response_page("Invalid Link", "This heartbeat link is not valid or has expired.", success=False),
+            content=_response_page(t("heartbeat_response.invalid_title", lang), t("heartbeat_response.invalid_msg", lang), success=False),
             status_code=404,
         )
 
     if heartbeat.status == "responded":
         return HTMLResponse(
-            content=_response_page("Already Confirmed", "You've already responded to this heartbeat. You're all good!", success=True),
+            content=_response_page(t("heartbeat_response.already_title", lang), t("heartbeat_response.already_msg", lang), success=True),
         )
 
     if heartbeat.status == "missed":
         return HTMLResponse(
-            content=_response_page("Expired", "This heartbeat window has closed. Your next check-in will arrive on schedule.", success=False),
+            content=_response_page(t("heartbeat_response.expired_title", lang), t("heartbeat_response.expired_msg", lang), success=False),
         )
 
     # Mark as responded
@@ -79,8 +88,8 @@ async def respond_to_heartbeat(token: str, db: AsyncSession = Depends(get_db)):
     heartbeat.responded_at = datetime.now(timezone.utc)
 
     # Reset consecutive misses
-    user_result = await db.execute(select(User).where(User.id == heartbeat.user_id))
-    user = user_result.scalar_one_or_none()
+    user_result2 = await db.execute(select(User).where(User.id == heartbeat.user_id))
+    user = user_result2.scalar_one_or_none()
     if user:
         user.consecutive_misses = 0
         user.last_heartbeat_at = datetime.now(timezone.utc)
@@ -88,7 +97,7 @@ async def respond_to_heartbeat(token: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     return HTMLResponse(
-        content=_response_page("You're Confirmed!", "Heartbeat received. Stay safe!", success=True),
+        content=_response_page(t("heartbeat_response.confirmed_title", lang), t("heartbeat_response.confirmed_msg", lang), success=True),
     )
 
 

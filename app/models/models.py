@@ -21,6 +21,9 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str] = mapped_column(String(100), nullable=True)
 
+    # Language preference
+    language: Mapped[str] = mapped_column(String(10), default="en")
+
     # ntfy.sh push notification topic (unique per user)
     ntfy_topic: Mapped[str] = mapped_column(String(100), unique=True, nullable=True)
 

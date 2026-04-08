@@ -6,8 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.models import User, Secret, Recipient, HeartbeatLog, TriggerLog
 from app.services.auth import decode_token
+from app.i18n import t, SUPPORTED_LANGUAGES
 
 router = APIRouter(tags=["web"])
+
+
+def _t(key: str, lang: str) -> str:
+    """Shortcut for template translations. Escapes curly braces for f-string safety."""
+    return t(key, lang)
 
 
 async def _get_web_user(request: Request, db: AsyncSession) -> User | None:
@@ -22,11 +28,22 @@ async def _get_web_user(request: Request, db: AsyncSession) -> User | None:
     return result.scalar_one_or_none()
 
 
+def _get_lang(request: Request, user: User | None = None) -> str:
+    """Determine language: ?lang= query param > user.language > 'en'."""
+    lang = request.query_params.get("lang")
+    if lang:
+        return lang
+    if user and hasattr(user, "language") and user.language:
+        return user.language
+    return "en"
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, db: AsyncSession = Depends(get_db)):
     user = await _get_web_user(request, db)
     if not user:
-        return _login_page()
+        lang = _get_lang(request)
+        return _login_page(lang=lang)
     return RedirectResponse(url="/dashboard", status_code=302)
 
 
@@ -35,7 +52,8 @@ async def login_page(request: Request, db: AsyncSession = Depends(get_db)):
     user = await _get_web_user(request, db)
     if user:
         return RedirectResponse(url="/dashboard", status_code=302)
-    return _login_page()
+    lang = _get_lang(request)
+    return _login_page(lang=lang)
 
 
 @router.get("/register", response_class=HTMLResponse)
@@ -43,7 +61,8 @@ async def register_page(request: Request, db: AsyncSession = Depends(get_db)):
     user = await _get_web_user(request, db)
     if user:
         return RedirectResponse(url="/dashboard", status_code=302)
-    return _register_page()
+    lang = _get_lang(request)
+    return _register_page(lang=lang)
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -51,6 +70,8 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     user = await _get_web_user(request, db)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
+
+    lang = _get_lang(request, user)
 
     # Get counts
     secrets_result = await db.execute(
@@ -85,7 +106,7 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     )
     triggers_count = triggers_result.scalar()
 
-    return _dashboard_page(user, secrets_count, recipients_count, recent_logs, triggers_count)
+    return _dashboard_page(user, secrets_count, recipients_count, recent_logs, triggers_count, lang=lang)
 
 
 @router.get("/manage/secrets", response_class=HTMLResponse)
@@ -94,11 +115,13 @@ async def manage_secrets(request: Request, db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url="/login", status_code=302)
 
+    lang = _get_lang(request, user)
+
     result = await db.execute(
         select(Secret).where(Secret.user_id == user.id).order_by(Secret.created_at.desc())
     )
     secrets = result.scalars().all()
-    return _secrets_page(user, secrets)
+    return _secrets_page(user, secrets, lang=lang)
 
 
 @router.get("/manage/recipients", response_class=HTMLResponse)
@@ -106,6 +129,8 @@ async def manage_recipients(request: Request, db: AsyncSession = Depends(get_db)
     user = await _get_web_user(request, db)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
+
+    lang = _get_lang(request, user)
 
     result = await db.execute(
         select(Recipient).where(Recipient.user_id == user.id).order_by(Recipient.created_at.desc())
@@ -118,7 +143,7 @@ async def manage_recipients(request: Request, db: AsyncSession = Depends(get_db)
     )
     secrets = secrets_result.scalars().all()
 
-    return _recipients_page(user, recipients, secrets)
+    return _recipients_page(user, recipients, secrets, lang=lang)
 
 
 @router.get("/settings", response_class=HTMLResponse)
@@ -126,7 +151,8 @@ async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
     user = await _get_web_user(request, db)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
-    return _settings_page(user)
+    lang = _get_lang(request, user)
+    return _settings_page(user, lang=lang)
 
 
 @router.get("/simulate", response_class=HTMLResponse)
@@ -134,14 +160,17 @@ async def simulate_page(request: Request, db: AsyncSession = Depends(get_db)):
     user = await _get_web_user(request, db)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
-    return _simulate_page(user)
+    lang = _get_lang(request, user)
+    return _simulate_page(user, lang=lang)
 
 
 @router.get("/reveal/{token}", response_class=HTMLResponse)
-async def reveal_page(token: str, db: AsyncSession = Depends(get_db)):
+async def reveal_page(token: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Render the E2E secret reveal page. Decryption happens client-side."""
     from datetime import datetime, timezone
     from app.models.models import RevealToken
+
+    lang = request.query_params.get("lang", "en")
 
     result = await db.execute(
         select(RevealToken).where(RevealToken.token == token)
@@ -149,18 +178,30 @@ async def reveal_page(token: str, db: AsyncSession = Depends(get_db)):
     reveal = result.scalar_one_or_none()
 
     if not reveal:
-        return HTMLResponse(content=_reveal_error_page("Invalid Link", "This reveal link is not valid."), status_code=404)
+        return HTMLResponse(content=_reveal_error_page(
+            _t("reveal.error_invalid_title", lang),
+            _t("reveal.error_invalid_msg", lang),
+            lang=lang,
+        ), status_code=404)
 
     now = datetime.now(timezone.utc)
     expires = reveal.expires_at.replace(tzinfo=timezone.utc) if reveal.expires_at.tzinfo is None else reveal.expires_at
     if expires < now:
-        return HTMLResponse(content=_reveal_error_page("Expired", "This reveal link has expired."), status_code=410)
+        return HTMLResponse(content=_reveal_error_page(
+            _t("reveal.error_expired_title", lang),
+            _t("reveal.error_expired_msg", lang),
+            lang=lang,
+        ), status_code=410)
 
     # Load secret and sender info
     secret_result = await db.execute(select(Secret).where(Secret.id == reveal.secret_id))
     secret = secret_result.scalar_one_or_none()
     if not secret:
-        return HTMLResponse(content=_reveal_error_page("Not Found", "The secret could not be found."), status_code=404)
+        return HTMLResponse(content=_reveal_error_page(
+            _t("reveal.error_not_found_title", lang),
+            _t("reveal.error_not_found_msg", lang),
+            lang=lang,
+        ), status_code=404)
 
     from app.models.models import User as UserModel
     user_result = await db.execute(select(UserModel).where(UserModel.id == secret.user_id))
@@ -178,12 +219,13 @@ async def reveal_page(token: str, db: AsyncSession = Depends(get_db)):
         encryption_nonce=secret.encryption_nonce,
         encryption_tag=secret.encryption_tag,
         encryption_salt=secret.encryption_salt,
+        lang=lang,
     ))
 
 
 # ==================== HTML Templates ====================
 
-def _base_html(title: str, content: str, user: User | None = None) -> str:
+def _base_html(title: str, content: str, user: User | None = None, lang: str = "en") -> str:
     nav = ""
     if user:
         nav = f"""
@@ -191,20 +233,20 @@ def _base_html(title: str, content: str, user: User | None = None) -> str:
             <div class="nav-left">
                 <a href="/dashboard" class="logo">RUThere</a>
             </div>
-            <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Menu">
+            <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="{_t('nav.menu', lang)}">
                 <span></span><span></span><span></span>
             </button>
             <div class="nav-links">
-                <a href="/dashboard">Dashboard</a>
-                <a href="/manage/secrets">Secrets</a>
-                <a href="/manage/recipients">Recipients</a>
-                <a href="/simulate">Simulate</a>
-                <a href="/settings">Settings</a>
-                <a href="#" onclick="logout()">Logout</a>
+                <a href="/dashboard">{_t("nav.dashboard", lang)}</a>
+                <a href="/manage/secrets">{_t("nav.secrets", lang)}</a>
+                <a href="/manage/recipients">{_t("nav.recipients", lang)}</a>
+                <a href="/simulate">{_t("nav.simulate", lang)}</a>
+                <a href="/settings">{_t("nav.settings", lang)}</a>
+                <a href="#" onclick="logout()">{_t("nav.logout", lang)}</a>
             </div>
         </nav>"""
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{lang}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -234,6 +276,20 @@ def _base_html(title: str, content: str, user: User | None = None) -> str:
 
         /* Cards */
         .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 16px; overflow-x: auto; }}
+
+        /* Password input with show/hide toggle */
+        .pass-wrapper {{ position: relative; }}
+        .pass-wrapper input {{ padding-right: 48px; }}
+        .pass-toggle {{ position: absolute; right: 12px; top: 12px; background: none; border: none; color: #64748b; cursor: pointer; font-size: 13px; padding: 2px 4px; user-select: none; -webkit-tap-highlight-color: transparent; }}
+        .pass-toggle:hover {{ color: #94a3b8; }}
+
+        /* Toggle switch */
+        .toggle-switch {{ position: relative; display: inline-block; width: 48px; height: 26px; flex-shrink: 0; }}
+        .toggle-switch input {{ opacity: 0; width: 0; height: 0; position: absolute; }}
+        .toggle-slider {{ position: absolute; cursor: pointer; inset: 0; background: #475569; border-radius: 26px; transition: 0.25s; }}
+        .toggle-slider::before {{ content: ""; position: absolute; height: 20px; width: 20px; left: 3px; bottom: 3px; background: #e2e8f0; border-radius: 50%; transition: 0.25s; }}
+        .toggle-switch input:checked + .toggle-slider {{ background: #22c55e; }}
+        .toggle-switch input:checked + .toggle-slider::before {{ transform: translateX(22px); }}
 
         /* Stats grid */
         .grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 24px; }}
@@ -345,6 +401,17 @@ def _base_html(title: str, content: str, user: User | None = None) -> str:
     {nav}
     {content}
     <script>
+        function togglePassword(inputId, btn) {{
+            const input = document.getElementById(inputId);
+            if (input.type === 'password') {{
+                input.type = 'text';
+                btn.textContent = 'Hide';
+            }} else {{
+                input.type = 'password';
+                btn.textContent = 'Show';
+            }}
+        }}
+
         async function apiCall(method, url, body) {{
             const opts = {{
                 method,
@@ -379,90 +446,90 @@ def _base_html(title: str, content: str, user: User | None = None) -> str:
 </html>"""
 
 
-def _login_page() -> str:
-    content = """
+def _login_page(lang: str = "en") -> str:
+    content = f"""
     <div class="auth-container">
         <div class="auth-card">
-            <h1>RUThere</h1>
-            <p class="subtitle">Dead man's switch / heartbeat system</p>
+            <h1>{_t("app.name", lang)}</h1>
+            <p class="subtitle">{_t("app.tagline", lang)}</p>
             <div id="alert" class="alert"></div>
             <form onsubmit="handleLogin(event)">
                 <div class="form-row">
-                    <label for="email">Email</label>
-                    <input type="email" id="email" required placeholder="you@example.com">
+                    <label for="email">{_t("auth.email", lang)}</label>
+                    <input type="email" id="email" required placeholder="{_t("auth.email_placeholder", lang)}">
                 </div>
                 <div class="form-row">
-                    <label for="password">Password</label>
-                    <input type="password" id="password" required placeholder="Your password">
+                    <label for="password">{_t("auth.password", lang)}</label>
+                    <input type="password" id="password" required placeholder="{_t("auth.password_placeholder", lang)}">
                 </div>
-                <button type="submit" class="btn btn-primary">Sign In</button>
+                <button type="submit" class="btn btn-primary">{_t("auth.sign_in", lang)}</button>
             </form>
-            <p class="auth-link">Don't have an account? <a href="/register">Register</a></p>
+            <p class="auth-link">{_t("auth.no_account", lang)} <a href="/register">{_t("auth.register", lang)}</a></p>
         </div>
     </div>
     <script>
-        async function handleLogin(e) {
+        async function handleLogin(e) {{
             e.preventDefault();
-            try {
-                const data = await apiCall('POST', '/api/auth/login', {
+            try {{
+                const data = await apiCall('POST', '/api/auth/login', {{
                     email: document.getElementById('email').value,
                     password: document.getElementById('password').value,
-                });
+                }});
                 window.location.href = '/dashboard';
-            } catch (err) {
+            }} catch (err) {{
                 showAlert('alert', err.message, true);
-            }
-        }
+            }}
+        }}
     </script>"""
-    return _base_html("Login", content)
+    return _base_html(_t("auth.sign_in", lang), content, lang=lang)
 
 
-def _register_page() -> str:
-    content = """
+def _register_page(lang: str = "en") -> str:
+    content = f"""
     <div class="auth-container">
         <div class="auth-card">
-            <h1>Create Account</h1>
-            <p class="subtitle">Set up your heartbeat system</p>
+            <h1>{_t("auth.create_account", lang)}</h1>
+            <p class="subtitle">{_t("auth.setup_subtitle", lang)}</p>
             <div id="alert" class="alert"></div>
             <form onsubmit="handleRegister(event)">
                 <div class="form-row">
-                    <label for="display_name">Display Name</label>
-                    <input type="text" id="display_name" placeholder="Your name">
+                    <label for="display_name">{_t("auth.display_name", lang)}</label>
+                    <input type="text" id="display_name" placeholder="{_t("auth.display_name_placeholder", lang)}">
                 </div>
                 <div class="form-row">
-                    <label for="email">Email</label>
-                    <input type="email" id="email" required placeholder="you@example.com">
+                    <label for="email">{_t("auth.email", lang)}</label>
+                    <input type="email" id="email" required placeholder="{_t("auth.email_placeholder", lang)}">
                 </div>
                 <div class="form-row">
-                    <label for="password">Password</label>
-                    <input type="password" id="password" required minlength="8" placeholder="Min 8 characters">
+                    <label for="password">{_t("auth.password", lang)}</label>
+                    <input type="password" id="password" required minlength="8" placeholder="{_t("auth.password_min", lang)}">
                 </div>
-                <button type="submit" class="btn btn-primary">Create Account</button>
+                <button type="submit" class="btn btn-primary">{_t("auth.create_account", lang)}</button>
             </form>
-            <p class="auth-link">Already have an account? <a href="/login">Sign in</a></p>
+            <p class="auth-link">{_t("auth.have_account", lang)} <a href="/login">{_t("auth.sign_in", lang)}</a></p>
         </div>
     </div>
     <script>
-        async function handleRegister(e) {
+        async function handleRegister(e) {{
             e.preventDefault();
-            try {
-                const data = await apiCall('POST', '/api/auth/register', {
+            try {{
+                const data = await apiCall('POST', '/api/auth/register', {{
                     email: document.getElementById('email').value,
                     password: document.getElementById('password').value,
                     display_name: document.getElementById('display_name').value || null,
-                });
+                }});
                 // Set cookie manually since register doesn't set it via response
-                document.cookie = `access_token=${data.access_token}; path=/; max-age=${72*3600}; samesite=lax`;
+                document.cookie = `access_token=${{data.access_token}}; path=/; max-age=${{72*3600}}; samesite=lax`;
                 window.location.href = '/dashboard';
-            } catch (err) {
+            }} catch (err) {{
                 showAlert('alert', err.message, true);
-            }
-        }
+            }}
+        }}
     </script>"""
-    return _base_html("Register", content)
+    return _base_html(_t("auth.register", lang), content, lang=lang)
 
 
-def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recent_logs: list, triggers_count: int) -> str:
+def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recent_logs: list, triggers_count: int, lang: str = "en") -> str:
     status_class = ""
     if user.consecutive_misses > 0:
         status_class = "warning" if user.consecutive_misses < user.missed_threshold else "danger"
@@ -486,8 +553,8 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
             return dt.replace(tzinfo=dt_timezone.utc)
         return dt
 
-    last_hb = "Never"
-    last_hb_local = "Never"
+    last_hb = _t("dashboard.never", lang)
+    last_hb_local = _t("dashboard.never", lang)
     if user.last_heartbeat_at:
         aware = to_utc_aware(user.last_heartbeat_at)
         last_hb = aware.strftime("%Y-%m-%d %H:%M")
@@ -517,11 +584,11 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
         log_rows += f"""<tr>
             <td><span class="tz-time" data-utc="{sent_utc}" data-local="{sent_local}">{sent_local}</span></td>
             <td><span class="tz-time" data-utc="{resp_utc}" data-local="{resp_local}">{resp_local}</span></td>
-            <td><span class="badge {badge_cls}">{log.status}</span></td>
+            <td><span class="badge {badge_cls}">{_t("dashboard.status_" + log.status, lang)}</span></td>
         </tr>"""
 
     if not log_rows:
-        log_rows = '<tr><td colspan="3" style="text-align:center;color:#64748b;">No heartbeats sent yet</td></tr>'
+        log_rows = f'<tr><td colspan="3" style="text-align:center;color:#64748b;">{_t("dashboard.no_heartbeats", lang)}</td></tr>'
 
     # Compute next 3 upcoming heartbeat times
     upcoming_rows = ""
@@ -539,10 +606,10 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
                 upcoming_times.append(cursor)
 
             items = ""
-            for i, t in enumerate(upcoming_times):
-                t_utc = t.strftime("%Y-%m-%d %H:%M")
-                t_local = t.astimezone(user_tz).strftime("%Y-%m-%d %H:%M")
-                label = "Next" if i == 0 else f"#{i + 1}"
+            for i, t_time in enumerate(upcoming_times):
+                t_utc = t_time.strftime("%Y-%m-%d %H:%M")
+                t_local = t_time.astimezone(user_tz).strftime("%Y-%m-%d %H:%M")
+                label = _t("dashboard.next", lang) if i == 0 else f"#{i + 1}"
                 badge = 'style="background:#064e3b;color:#34d399;"' if i == 0 else 'style="background:#1e293b;color:#94a3b8;border:1px solid #334155;"'
                 items += f"""
                 <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;{'border-bottom:1px solid #334155;' if i < 2 else ''}">
@@ -551,44 +618,47 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
                 </div>"""
             upcoming_rows = items
         else:
-            upcoming_rows = '<p style="color:#64748b;text-align:center;">Scheduling first heartbeat...</p>'
+            upcoming_rows = f'<p style="color:#64748b;text-align:center;">{_t("dashboard.scheduling_first", lang)}</p>'
     else:
-        upcoming_rows = '<p style="color:#64748b;text-align:center;">Heartbeat is paused</p>'
+        upcoming_rows = f'<p style="color:#64748b;text-align:center;">{_t("dashboard.heartbeat_paused", lang)}</p>'
+
+    status_value = _t("dashboard.active", lang) if user.is_active else _t("dashboard.paused", lang)
+    status_warning = "warning" if not user.is_active else ""
 
     content = f"""
     <div class="container">
-        <h1>Dashboard</h1>
-        <p class="subtitle">Welcome back, {user.display_name or user.email}</p>
+        <h1>{_t("dashboard.title", lang)}</h1>
+        <p class="subtitle">{_t("dashboard.welcome", lang)} {user.display_name or user.email}</p>
 
         <div class="grid">
-            <div class="stat {'warning' if not user.is_active else ''}">
-                <div class="stat-value">{'Active' if user.is_active else 'Paused'}</div>
-                <div class="stat-label">Heartbeat Status</div>
+            <div class="stat {status_warning}">
+                <div class="stat-value">{status_value}</div>
+                <div class="stat-label">{_t("dashboard.heartbeat_status", lang)}</div>
             </div>
             <div class="stat {status_class}">
                 <div class="stat-value">{user.consecutive_misses} / {user.missed_threshold}</div>
-                <div class="stat-label">Consecutive Misses</div>
+                <div class="stat-label">{_t("dashboard.consecutive_misses", lang)}</div>
             </div>
             <div class="stat">
                 <div class="stat-value">{secrets_count}</div>
-                <div class="stat-label">Secrets Stored</div>
+                <div class="stat-label">{_t("dashboard.secrets_stored", lang)}</div>
             </div>
             <div class="stat">
                 <div class="stat-value">{recipients_count}</div>
-                <div class="stat-label">Recipients</div>
+                <div class="stat-label">{_t("dashboard.recipients", lang)}</div>
             </div>
         </div>
 
         <div style="margin-bottom:16px;">
             <div class="flex" style="margin-bottom:8px;">
-                <h2 style="margin-bottom:0;">Recent Heartbeats</h2>
+                <h2 style="margin-bottom:0;">{_t("dashboard.recent_heartbeats", lang)}</h2>
                 <span id="tz-toggle" onclick="toggleTimezone()" 
                       style="cursor:pointer;background:#334155;padding:3px 10px;border-radius:9999px;font-size:12px;font-weight:600;color:#22c55e;user-select:none;"
                       title="Click to switch between local and UTC">{tz_abbrev}</span>
             </div>
             <div class="flex" style="gap:8px;align-items:center;">
-                <button class="btn btn-secondary btn-sm" onclick="testHeartbeat()" style="white-space:nowrap;">Send Test</button>
-                <span style="color:#64748b;font-size:12px;">Test heartbeats won't count as a miss if unresponded</span>
+                <button class="btn btn-secondary btn-sm" onclick="testHeartbeat()" style="white-space:nowrap;">{_t("dashboard.send_test", lang)}</button>
+                <span style="color:#64748b;font-size:12px;">{_t("dashboard.test_safe", lang)}</span>
             </div>
         </div>
         <div id="hb-alert" class="alert"></div>
@@ -596,13 +666,13 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
         <div class="card">
             <table>
                 <thead>
-                    <tr><th>Sent</th><th>Responded</th><th>Status</th></tr>
+                    <tr><th>{_t("dashboard.col_sent", lang)}</th><th>{_t("dashboard.col_responded", lang)}</th><th>{_t("dashboard.col_status", lang)}</th></tr>
                 </thead>
                 <tbody>{log_rows}</tbody>
             </table>
         </div>
 
-        <h2 style="margin-bottom:12px;">Upcoming Heartbeats</h2>
+        <h2 style="margin-bottom:12px;">{_t("dashboard.upcoming", lang)}</h2>
         <div class="card">
             {upcoming_rows}
         </div>
@@ -610,13 +680,13 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
         <div class="card">
             <div class="flex-between">
                 <div>
-                    <strong>Last confirmed heartbeat:</strong>
+                    <strong>{_t("dashboard.last_confirmed", lang)}</strong>
                     <span class="tz-time" data-utc="{last_hb}" data-local="{last_hb_local}">{last_hb_local}</span>
                 </div>
                 <div>
-                    <strong>Interval:</strong> every {user.heartbeat_interval_hours}h
+                    <strong>{_t("dashboard.interval", lang)}</strong> {_t("dashboard.every_hours", lang).replace("{n}", str(user.heartbeat_interval_hours))}
                     &nbsp;|&nbsp;
-                    <strong>Window:</strong> {user.response_window_hours}h
+                    <strong>{_t("dashboard.window", lang)}</strong> {_t("dashboard.hours_unit", lang).replace("{n}", str(user.response_window_hours))}
                 </div>
             </div>
         </div>
@@ -624,10 +694,10 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
         <div class="card" style="margin-top: 12px;">
             <div class="flex-between">
                 <div>
-                    <strong>ntfy topic:</strong> <code>{user.ntfy_topic or 'Not configured'}</code>
+                    <strong>{_t("dashboard.ntfy_topic", lang)}</strong> <code>{user.ntfy_topic or _t("dashboard.not_configured", lang)}</code>
                 </div>
                 <div>
-                    <strong>Triggers fired:</strong> {triggers_count}
+                    <strong>{_t("dashboard.triggers_fired", lang)}</strong> {triggers_count}
                 </div>
             </div>
         </div>
@@ -648,87 +718,94 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
         async function testHeartbeat() {{
             try {{
                 await apiCall('POST', '/api/heartbeat/test');
-                showAlert('hb-alert', 'Test heartbeat sent! Check your ntfy app or email.', false);
+                showAlert('hb-alert', '{_t("dashboard.test_sent", lang)}', false);
             }} catch (err) {{
                 showAlert('hb-alert', err.message, true);
             }}
         }}
     </script>"""
-    return _base_html("Dashboard", content, user)
+    return _base_html(_t("dashboard.title", lang), content, user, lang=lang)
 
 
-def _secrets_page(user: User, secrets: list) -> str:
+def _secrets_page(user: User, secrets: list, lang: str = "en") -> str:
     rows = ""
     for s in secrets:
         enc_type = getattr(s, 'encryption_type', 'server') or 'server'
-        badge = '<span class="badge badge-green" style="font-size:11px;" title="End-to-end encrypted — server cannot read this">E2E</span>' if enc_type == 'e2e' else '<span class="badge badge-gray" style="font-size:11px;" title="Encrypted on server">Server</span>'
+        badge = f'<span class="badge badge-green" style="font-size:11px;" title="{_t("secrets.e2e_badge_title", lang)}">{_t("secrets.e2e_badge", lang)}</span>' if enc_type == 'e2e' else f'<span class="badge badge-gray" style="font-size:11px;" title="{_t("secrets.server_badge_title", lang)}">{_t("secrets.server_badge", lang)}</span>'
         view_onclick = f"viewE2ESecret('{s.id}')" if enc_type == 'e2e' else f"viewSecret('{s.id}')"
         rows += f"""<tr id="secret-{s.id}">
             <td><strong>{s.title}</strong> {badge}</td>
             <td>{s.created_at.strftime("%Y-%m-%d")}</td>
             <td>
-                <button class="btn btn-secondary btn-sm" onclick="{view_onclick}">View</button>
-                <button class="btn btn-danger btn-sm" onclick="deleteSecret('{s.id}')">Delete</button>
+                <button class="btn btn-secondary btn-sm" onclick="{view_onclick}">{_t("secrets.view", lang)}</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteSecret('{s.id}')">{_t("secrets.delete", lang)}</button>
             </td>
         </tr>"""
 
     if not rows:
-        rows = '<tr><td colspan="3" style="text-align:center;color:#64748b;">No secrets stored yet. Add your first one below.</td></tr>'
+        rows = f'<tr><td colspan="3" style="text-align:center;color:#64748b;">{_t("secrets.no_secrets", lang)}</td></tr>'
 
     content = f"""
     <div class="container">
-        <h1>Vault Secrets</h1>
-        <p class="subtitle">Encrypted messages that will be sent to your designated recipients</p>
+        <h1>{_t("secrets.title", lang)}</h1>
+        <p class="subtitle">{_t("secrets.subtitle", lang)}</p>
 
         <div id="alert" class="alert"></div>
 
         <div class="card">
             <table>
-                <thead><tr><th>Title</th><th>Created</th><th>Actions</th></tr></thead>
+                <thead><tr><th>{_t("secrets.col_title", lang)}</th><th>{_t("secrets.col_created", lang)}</th><th>{_t("secrets.col_actions", lang)}</th></tr></thead>
                 <tbody id="secrets-table">{rows}</tbody>
             </table>
         </div>
 
         <div class="card">
-            <h2>Add New Secret</h2>
+            <h2>{_t("secrets.add_new", lang)}</h2>
             <form onsubmit="addSecret(event)">
                 <div class="form-row">
-                    <label>Encryption Type</label>
+                    <label>{_t("secrets.encryption_type", lang)}</label>
                     <div style="display:flex;gap:12px;margin-bottom:12px;">
                         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 16px;background:#0f172a;border:2px solid #334155;border-radius:8px;flex:1;font-size:14px;" id="enc-server-label">
                             <input type="radio" name="enc_type" value="server" checked onchange="toggleEncType()" style="width:auto;margin:0;">
-                            Server encrypted
+                            {_t("secrets.server_encrypted", lang)}
                         </label>
                         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:10px 16px;background:#0f172a;border:2px solid #334155;border-radius:8px;flex:1;font-size:14px;" id="enc-e2e-label">
                             <input type="radio" name="enc_type" value="e2e" onchange="toggleEncType()" style="width:auto;margin:0;">
-                            End-to-end encrypted
+                            {_t("secrets.e2e_encrypted", lang)}
                         </label>
                     </div>
                 </div>
                 <div id="e2e-info" style="display:none;background:#064e3b;border:1px solid #065f46;border-radius:8px;padding:14px;margin-bottom:16px;font-size:13px;color:#34d399;line-height:1.5;">
-                    <strong>Zero-knowledge encryption.</strong> Your secret is encrypted in your browser before it reaches the server.
-                    The server never sees the plaintext or the passphrase. Only someone with the passphrase can decrypt it.
+                    <strong>{_t("secrets.e2e_info_bold", lang)}</strong> {_t("secrets.e2e_info", lang)}
                     <br><br>
-                    <strong>Verify:</strong> Open your browser's Network tab and confirm — no plaintext or passphrase is sent.
+                    <strong>{_t("secrets.e2e_verify_bold", lang)}</strong> {_t("secrets.e2e_verify", lang)}
                 </div>
                 <div class="form-row">
-                    <label for="title">Title</label>
-                    <input type="text" id="title" required placeholder="e.g., Password Manager Master Key">
+                    <label for="title">{_t("secrets.secret_title", lang)}</label>
+                    <input type="text" id="title" required placeholder="{_t("secrets.title_placeholder", lang)}">
                 </div>
                 <div class="form-row">
-                    <label for="content">Secret Content</label>
-                    <textarea id="content" required placeholder="The secret message or information..."></textarea>
+                    <label for="content">{_t("secrets.secret_content", lang)}</label>
+                    <textarea id="content" required placeholder="{_t("secrets.content_placeholder", lang)}"></textarea>
                 </div>
                 <div class="form-row" id="passphrase-row" style="display:none;">
-                    <label for="passphrase">Passphrase</label>
-                    <input type="password" id="passphrase" placeholder="A passphrase you'll share with the recipient">
-                    <small style="color:#64748b;">You must share this passphrase with your recipient out-of-band (in person, phone call, etc). Without it, nobody can decrypt this secret — not even the server.</small>
+                    <label for="passphrase">{_t("secrets.passphrase", lang)}</label>
+                    <div class="pass-wrapper">
+                        <input type="password" id="passphrase" placeholder="{_t("secrets.passphrase_placeholder", lang)}">
+                        <button type="button" class="pass-toggle" onclick="togglePassword('passphrase', this)">{_t("secrets.show", lang)}</button>
+                    </div>
+                    <div style="background:#450a0a;border:1px solid #991b1b;border-radius:8px;padding:12px;margin-top:8px;font-size:13px;color:#f87171;line-height:1.5;">
+                        <strong>{_t("secrets.passphrase_warning_bold", lang)}</strong> {_t("secrets.passphrase_warning", lang)}
+                    </div>
                 </div>
                 <div class="form-row" id="passphrase-confirm-row" style="display:none;">
-                    <label for="passphrase_confirm">Confirm Passphrase</label>
-                    <input type="password" id="passphrase_confirm" placeholder="Type the passphrase again">
+                    <label for="passphrase_confirm">{_t("secrets.confirm_passphrase", lang)}</label>
+                    <div class="pass-wrapper">
+                        <input type="password" id="passphrase_confirm" placeholder="{_t("secrets.confirm_placeholder", lang)}">
+                        <button type="button" class="pass-toggle" onclick="togglePassword('passphrase_confirm', this)">{_t("secrets.show", lang)}</button>
+                    </div>
                 </div>
-                <button type="submit" class="btn btn-primary" id="save-btn">Encrypt & Save</button>
+                <button type="submit" class="btn btn-primary" id="save-btn">{_t("secrets.encrypt_save", lang)}</button>
             </form>
         </div>
 
@@ -737,7 +814,7 @@ def _secrets_page(user: User, secrets: list) -> str:
             <div class="card" style="max-width:500px; width:90%; margin:auto; position:relative; top:50%; transform:translateY(-50%);">
                 <div class="flex-between mb-4">
                     <h2 id="modal-title"></h2>
-                    <button class="btn btn-secondary btn-sm" onclick="closeModal()">Close</button>
+                    <button class="btn btn-secondary btn-sm" onclick="closeModal()">{_t("secrets.close", lang)}</button>
                 </div>
                 <pre id="modal-content" style="background:#0f172a;padding:16px;border-radius:8px;white-space:pre-wrap;font-size:14px;max-height:400px;overflow-y:auto;"></pre>
             </div>
@@ -748,18 +825,21 @@ def _secrets_page(user: User, secrets: list) -> str:
             <div class="card" style="max-width:500px; width:90%; margin:auto; position:relative; top:50%; transform:translateY(-50%);">
                 <div class="flex-between mb-4">
                     <h2 id="e2e-modal-title"></h2>
-                    <button class="btn btn-secondary btn-sm" onclick="closeE2EModal()">Close</button>
+                    <button class="btn btn-secondary btn-sm" onclick="closeE2EModal()">{_t("secrets.close", lang)}</button>
                 </div>
                 <div id="e2e-modal-form">
                     <div style="background:#064e3b;border:1px solid #065f46;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:#34d399;display:flex;align-items:center;gap:8px;">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                        End-to-end encrypted — decrypts in your browser
+                        {_t("secrets.e2e_modal_info", lang)}
                     </div>
-                    <label for="e2e-view-passphrase">Passphrase</label>
-                    <input type="password" id="e2e-view-passphrase" placeholder="Enter passphrase to decrypt"
-                           onkeydown="if(event.key==='Enter')decryptE2EView()">
+                    <label for="e2e-view-passphrase">{_t("secrets.passphrase", lang)}</label>
+                    <div class="pass-wrapper">
+                        <input type="password" id="e2e-view-passphrase" placeholder="{_t("secrets.passphrase_decrypt_placeholder", lang)}"
+                               onkeydown="if(event.key==='Enter')decryptE2EView()">
+                        <button type="button" class="pass-toggle" onclick="togglePassword('e2e-view-passphrase', this)">{_t("secrets.show", lang)}</button>
+                    </div>
                     <div id="e2e-view-error" style="display:none;background:#450a0a;color:#f87171;border:1px solid #991b1b;padding:10px;border-radius:8px;margin-bottom:12px;font-size:13px;"></div>
-                    <button class="btn btn-primary" onclick="decryptE2EView()" id="e2e-decrypt-btn">Decrypt</button>
+                    <button class="btn btn-primary" onclick="decryptE2EView()" id="e2e-decrypt-btn">{_t("secrets.decrypt", lang)}</button>
                 </div>
                 <pre id="e2e-modal-content" style="display:none;background:#0f172a;padding:16px;border-radius:8px;white-space:pre-wrap;font-size:14px;max-height:400px;overflow-y:auto;"></pre>
             </div>
@@ -794,15 +874,15 @@ def _secrets_page(user: User, secrets: list) -> str:
                     const passphrase = document.getElementById('passphrase').value;
                     const confirm = document.getElementById('passphrase_confirm').value;
                     if (passphrase !== confirm) {{
-                        showAlert('alert', 'Passphrases do not match.', true);
+                        showAlert('alert', '{_t("secrets.mismatch", lang)}', true);
                         return;
                     }}
                     if (passphrase.length < 6) {{
-                        showAlert('alert', 'Passphrase must be at least 6 characters.', true);
+                        showAlert('alert', '{_t("secrets.too_short", lang)}', true);
                         return;
                     }}
 
-                    document.getElementById('save-btn').textContent = 'Encrypting...';
+                    document.getElementById('save-btn').textContent = '{_t("secrets.encrypting", lang)}';
                     document.getElementById('save-btn').disabled = true;
 
                     // Encrypt client-side
@@ -816,18 +896,18 @@ def _secrets_page(user: User, secrets: list) -> str:
                         encryption_tag: encrypted.encryption_tag,
                         encryption_salt: encrypted.encryption_salt,
                     }});
-                    showAlert('alert', 'Secret end-to-end encrypted and saved! The server cannot read it.', false);
+                    showAlert('alert', '{_t("secrets.e2e_saved", lang)}', false);
                 }} else {{
                     await apiCall('POST', '/api/secrets', {{
                         title: title,
                         content: content,
                     }});
-                    showAlert('alert', 'Secret encrypted and saved!', false);
+                    showAlert('alert', '{_t("secrets.server_saved", lang)}', false);
                 }}
                 setTimeout(() => location.reload(), 1000);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
-                document.getElementById('save-btn').textContent = 'Encrypt & Save';
+                document.getElementById('save-btn').textContent = '{_t("secrets.encrypt_save", lang)}';
                 document.getElementById('save-btn').disabled = false;
             }}
         }}
@@ -864,7 +944,7 @@ def _secrets_page(user: User, secrets: list) -> str:
             if (!passphrase) return;
             const btn = document.getElementById('e2e-decrypt-btn');
             btn.disabled = true;
-            btn.textContent = 'Decrypting...';
+            btn.textContent = '{_t("secrets.decrypting", lang)}';
             try {{
                 const plaintext = await E2E.decrypt(
                     currentE2EData.encrypted_content,
@@ -877,11 +957,11 @@ def _secrets_page(user: User, secrets: list) -> str:
                 document.getElementById('e2e-modal-content').style.display = 'block';
                 document.getElementById('e2e-modal-content').textContent = plaintext;
             }} catch (err) {{
-                document.getElementById('e2e-view-error').textContent = 'Incorrect passphrase.';
+                document.getElementById('e2e-view-error').textContent = '{_t("secrets.wrong_passphrase", lang)}';
                 document.getElementById('e2e-view-error').style.display = 'block';
             }}
             btn.disabled = false;
-            btn.textContent = 'Decrypt';
+            btn.textContent = '{_t("secrets.decrypt", lang)}';
         }}
 
         function closeModal() {{
@@ -894,25 +974,25 @@ def _secrets_page(user: User, secrets: list) -> str:
         }}
 
         async function deleteSecret(id) {{
-            if (!confirm('Delete this secret? This cannot be undone.')) return;
+            if (!confirm('{_t("secrets.confirm_delete", lang)}')) return;
             try {{
                 await apiCall('DELETE', `/api/secrets/${{id}}`);
                 document.getElementById(`secret-${{id}}`).remove();
-                showAlert('alert', 'Secret deleted.', false);
+                showAlert('alert', '{_t("secrets.deleted", lang)}', false);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
         }}
     </script>"""
-    return _base_html("Secrets", content, user)
+    return _base_html(_t("secrets.title", lang), content, user, lang=lang)
 
 
-def _recipients_page(user: User, recipients: list, secrets: list) -> str:
+def _recipients_page(user: User, recipients: list, secrets: list, lang: str = "en") -> str:
     secret_options = "".join(
         f'<option value="{s.id}">{s.title}</option>' for s in secrets
     )
     if not secret_options:
-        secret_options = '<option value="" disabled>No secrets yet — create one first</option>'
+        secret_options = f'<option value="" disabled>{_t("recipients.no_secrets", lang)}</option>'
 
     rows = ""
     for r in recipients:
@@ -923,43 +1003,43 @@ def _recipients_page(user: User, recipients: list, secrets: list) -> str:
             <td>{r.email}</td>
             <td>{secret_title}</td>
             <td>
-                <button class="btn btn-danger btn-sm" onclick="deleteRecipient('{r.id}')">Delete</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteRecipient('{r.id}')">{_t("recipients.delete", lang)}</button>
             </td>
         </tr>"""
 
     if not rows:
-        rows = '<tr><td colspan="4" style="text-align:center;color:#64748b;">No recipients configured yet.</td></tr>'
+        rows = f'<tr><td colspan="4" style="text-align:center;color:#64748b;">{_t("recipients.no_recipients", lang)}</td></tr>'
 
     content = f"""
     <div class="container">
-        <h1>Recipients</h1>
-        <p class="subtitle">People who will receive your secrets if the heartbeat triggers</p>
+        <h1>{_t("recipients.title", lang)}</h1>
+        <p class="subtitle">{_t("recipients.subtitle", lang)}</p>
 
         <div id="alert" class="alert"></div>
 
         <div class="card">
             <table>
-                <thead><tr><th>Name</th><th>Email</th><th>Secret</th><th>Actions</th></tr></thead>
+                <thead><tr><th>{_t("recipients.col_name", lang)}</th><th>{_t("recipients.col_email", lang)}</th><th>{_t("recipients.col_secret", lang)}</th><th>{_t("recipients.col_actions", lang)}</th></tr></thead>
                 <tbody id="recipients-table">{rows}</tbody>
             </table>
         </div>
 
         <div class="card">
-            <h2>Add Recipient</h2>
+            <h2>{_t("recipients.add", lang)}</h2>
             <form onsubmit="addRecipient(event)">
                 <div class="form-row">
-                    <label for="name">Recipient Name</label>
-                    <input type="text" id="name" required placeholder="e.g., John Doe">
+                    <label for="name">{_t("recipients.name_label", lang)}</label>
+                    <input type="text" id="name" required placeholder="{_t("recipients.name_placeholder", lang)}">
                 </div>
                 <div class="form-row">
-                    <label for="email">Recipient Email</label>
-                    <input type="email" id="rec-email" required placeholder="recipient@example.com">
+                    <label for="email">{_t("recipients.email_label", lang)}</label>
+                    <input type="email" id="rec-email" required placeholder="{_t("recipients.email_placeholder", lang)}">
                 </div>
                 <div class="form-row">
-                    <label for="secret_id">Secret to Send</label>
+                    <label for="secret_id">{_t("recipients.secret_label", lang)}</label>
                     <select id="secret_id" required>{secret_options}</select>
                 </div>
-                <button type="submit" class="btn btn-primary">Add Recipient</button>
+                <button type="submit" class="btn btn-primary">{_t("recipients.add", lang)}</button>
             </form>
         </div>
     </div>
@@ -972,7 +1052,7 @@ def _recipients_page(user: User, recipients: list, secrets: list) -> str:
                     email: document.getElementById('rec-email').value,
                     secret_id: document.getElementById('secret_id').value,
                 }});
-                showAlert('alert', 'Recipient added!', false);
+                showAlert('alert', '{_t("recipients.added", lang)}', false);
                 setTimeout(() => location.reload(), 1000);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
@@ -980,22 +1060,29 @@ def _recipients_page(user: User, recipients: list, secrets: list) -> str:
         }}
 
         async function deleteRecipient(id) {{
-            if (!confirm('Remove this recipient?')) return;
+            if (!confirm('{_t("recipients.confirm_remove", lang)}')) return;
             try {{
                 await apiCall('DELETE', `/api/recipients/${{id}}`);
                 document.getElementById(`recipient-${{id}}`).remove();
-                showAlert('alert', 'Recipient removed.', false);
+                showAlert('alert', '{_t("recipients.removed", lang)}', false);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
         }}
     </script>"""
-    return _base_html("Recipients", content, user)
+    return _base_html(_t("recipients.title", lang), content, user, lang=lang)
 
 
-def _settings_page(user: User) -> str:
+def _settings_page(user: User, lang: str = "en") -> str:
     active_checked = "checked" if user.is_active else ""
     display_name_val = user.display_name or ""
+
+    # Language options
+    lang_options = ""
+    user_lang = getattr(user, "language", "en") or "en"
+    for code, label in SUPPORTED_LANGUAGES:
+        selected = "selected" if code == user_lang else ""
+        lang_options += f'<option value="{code}" {selected}>{label}</option>'
 
     # Common timezone options
     common_timezones = [
@@ -1036,100 +1123,107 @@ def _settings_page(user: User) -> str:
     end_options = hour_options(user.active_hours_end)
     content = f"""
     <div class="container">
-        <h1>Settings</h1>
-        <p class="subtitle">Configure your profile, heartbeat schedule, and notification preferences</p>
+        <h1>{_t("settings.title", lang)}</h1>
+        <p class="subtitle">{_t("settings.subtitle", lang)}</p>
 
         <div id="alert" class="alert"></div>
 
         <div class="card">
-            <h2>Profile</h2>
+            <h2>{_t("settings.profile", lang)}</h2>
             <form onsubmit="saveProfile(event)">
                 <div class="form-row">
-                    <label for="display_name">Display Name</label>
-                    <input type="text" id="display_name" value="{display_name_val}" placeholder="Your name">
-                    <small style="color:#64748b;">This is how you'll appear to recipients in notification emails</small>
+                    <label for="display_name">{_t("settings.display_name", lang)}</label>
+                    <input type="text" id="display_name" value="{display_name_val}" placeholder="{_t("settings.display_name_placeholder", lang)}">
+                    <small style="color:#64748b;">{_t("settings.display_name_desc", lang)}</small>
                 </div>
                 <div class="form-row">
-                    <label>Email</label>
+                    <label>{_t("settings.email", lang)}</label>
                     <div style="background:#0f172a;padding:12px;border-radius:8px;font-size:14px;color:#94a3b8;">
                         {user.email}
                     </div>
                 </div>
-                <button type="submit" class="btn btn-primary mt-4">Save Profile</button>
+                <div class="form-row">
+                    <label for="language">Language</label>
+                    <select id="language">{lang_options}</select>
+                </div>
+                <button type="submit" class="btn btn-primary mt-4">{_t("settings.save_profile", lang)}</button>
             </form>
         </div>
 
         <div class="card">
-            <h2>Heartbeat Schedule</h2>
+            <h2>{_t("settings.schedule", lang)}</h2>
             <form onsubmit="saveSettings(event)">
                 <div class="form-row">
-                    <label for="timezone">Timezone</label>
+                    <label for="timezone">{_t("settings.timezone", lang)}</label>
                     <select id="timezone">{tz_options}</select>
                 </div>
                 <div class="form-row">
-                    <label for="interval">Heartbeat Interval (hours)</label>
+                    <label for="interval">{_t("settings.interval", lang)}</label>
                     <input type="number" id="interval" min="1" max="720" value="{user.heartbeat_interval_hours}">
-                    <small style="color:#64748b;">How often you'll receive a check-in prompt</small>
+                    <small style="color:#64748b;">{_t("settings.interval_desc", lang)}</small>
                 </div>
                 <div class="flex-row-responsive">
                     <div class="form-row" style="flex:1;">
-                        <label for="active_start">Active Hours Start</label>
+                        <label for="active_start">{_t("settings.active_start", lang)}</label>
                         <select id="active_start">{start_options}</select>
                     </div>
                     <div class="form-row" style="flex:1;">
-                        <label for="active_end">Active Hours End</label>
+                        <label for="active_end">{_t("settings.active_end", lang)}</label>
                         <select id="active_end">{end_options}</select>
                     </div>
                 </div>
-                <small style="color:#64748b;display:block;margin-bottom:12px;">Heartbeats will only be sent during these hours in your timezone. Outside this window, they are silently skipped (not counted as missed).</small>
+                <small style="color:#64748b;display:block;margin-bottom:12px;">{_t("settings.active_hours_desc", lang)}</small>
                 <div class="form-row">
-                    <label for="window">Response Window (hours)</label>
+                    <label for="window">{_t("settings.response_window", lang)}</label>
                     <input type="number" id="window" min="1" max="72" value="{user.response_window_hours}">
-                    <small style="color:#64748b;">How long you have to respond before it counts as a miss</small>
+                    <small style="color:#64748b;">{_t("settings.response_desc", lang)}</small>
                 </div>
                 <div class="form-row">
-                    <label for="threshold">Miss Threshold</label>
+                    <label for="threshold">{_t("settings.threshold", lang)}</label>
                     <input type="number" id="threshold" min="1" max="10" value="{user.missed_threshold}">
-                    <small style="color:#64748b;">Number of consecutive misses before triggering the dead man's switch</small>
+                    <small style="color:#64748b;">{_t("settings.threshold_desc", lang)}</small>
                 </div>
                 <div class="form-row">
-                    <label for="active" style="display:inline;">
-                        <input type="checkbox" id="active" {active_checked} style="width:auto;margin-right:8px;">
-                        Heartbeat Active
+                    <label for="active" style="display:flex;align-items:center;gap:12px;cursor:pointer;user-select:none;">
+                        <span class="toggle-switch">
+                            <input type="checkbox" id="active" {active_checked}>
+                            <span class="toggle-slider"></span>
+                        </span>
+                        {_t("settings.heartbeat_active", lang)}
                     </label>
                 </div>
-                <button type="submit" class="btn btn-primary mt-4">Save Settings</button>
+                <button type="submit" class="btn btn-primary mt-4">{_t("settings.save_settings", lang)}</button>
             </form>
         </div>
 
         <div class="card">
-            <h2>Notification Channels</h2>
+            <h2>{_t("settings.notifications", lang)}</h2>
             <p style="color:#94a3b8;margin-bottom:16px;font-size:14px;">
-                Heartbeat prompts are sent via ntfy push notification first, then email as fallback.
+                {_t("settings.notify_desc", lang)}
             </p>
             <div class="form-row">
-                <label>ntfy Topic (primary)</label>
+                <label>{_t("settings.ntfy_primary", lang)}</label>
                 <div style="background:#0f172a;padding:12px;border-radius:8px;font-family:monospace;font-size:14px;">
-                    {user.ntfy_topic or 'Not configured'}
+                    {user.ntfy_topic or _t("dashboard.not_configured", lang)}
                 </div>
                 <small style="color:#64748b;">
-                    Install the <a href="https://ntfy.sh" style="color:#22c55e;" target="_blank">ntfy app</a>
-                    on your phone and subscribe to this topic to receive push notifications.
+                    {_t("common.install_the", lang)} <a href="https://ntfy.sh" style="color:#22c55e;" target="_blank">{_t("common.ntfy_app", lang)}</a>
+                    {_t("settings.ntfy_instructions", lang)}
                 </small>
             </div>
             <div class="form-row" style="margin-top:8px;">
-                <label>Email (fallback)</label>
+                <label>{_t("settings.email_fallback", lang)}</label>
                 <div style="background:#0f172a;padding:12px;border-radius:8px;font-size:14px;color:#94a3b8;">
                     {user.email}
                 </div>
-                <small style="color:#64748b;">Used if ntfy fails to deliver.</small>
+                <small style="color:#64748b;">{_t("settings.email_fallback_desc", lang)}</small>
             </div>
         </div>
 
         <div class="card" style="border-color: #ef4444;">
-            <h2 style="color:#ef4444;">Danger Zone</h2>
-            <p style="color:#94a3b8;margin-bottom:16px;">Reset your consecutive miss counter back to 0.</p>
-            <button class="btn btn-danger" onclick="resetMisses()">Reset Miss Counter</button>
+            <h2 style="color:#ef4444;">{_t("settings.danger_zone", lang)}</h2>
+            <p style="color:#94a3b8;margin-bottom:16px;">{_t("settings.danger_desc", lang)}</p>
+            <button class="btn btn-danger" onclick="resetMisses()">{_t("settings.reset_counter", lang)}</button>
         </div>
     </div>
     <script>
@@ -1138,8 +1232,12 @@ def _settings_page(user: User) -> str:
             try {{
                 await apiCall('PUT', '/api/auth/profile', {{
                     display_name: document.getElementById('display_name').value || null,
+                    language: document.getElementById('language').value,
                 }});
-                showAlert('alert', 'Profile updated!', false);
+                showAlert('alert', '{_t("settings.profile_updated", lang)}', false);
+                // Reload to reflect language change
+                const newLang = document.getElementById('language').value;
+                setTimeout(() => window.location.href = '/settings?lang=' + newLang, 1000);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
@@ -1157,38 +1255,40 @@ def _settings_page(user: User) -> str:
                     active_hours_start: parseInt(document.getElementById('active_start').value),
                     active_hours_end: parseInt(document.getElementById('active_end').value),
                 }});
-                showAlert('alert', 'Settings saved!', false);
+                showAlert('alert', '{_t("settings.settings_saved", lang)}', false);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
         }}
 
         async function resetMisses() {{
-            if (!confirm('Reset consecutive miss counter to 0?')) return;
+            if (!confirm('{_t("settings.confirm_reset", lang)}')) return;
             try {{
                 await apiCall('PUT', '/api/heartbeat/settings', {{
                     is_active: true,
                 }});
-                showAlert('alert', 'Miss counter reset and heartbeat reactivated.', false);
+                showAlert('alert', '{_t("settings.reset_done", lang)}', false);
                 setTimeout(() => location.reload(), 1000);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
         }}
     </script>"""
-    return _base_html("Settings", content, user)
+    return _base_html(_t("settings.title", lang), content, user, lang=lang)
 
 
 def _reveal_page(sender_name: str, secret_title: str,
                  encrypted_content: str, encryption_nonce: str,
-                 encryption_tag: str, encryption_salt: str) -> str:
+                 encryption_tag: str, encryption_salt: str,
+                 lang: str = "en") -> str:
     """Render the E2E secret reveal page with client-side decryption."""
+    passphrase_label = _t("reveal.passphrase_label", lang).replace("{sender_name}", sender_name)
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{lang}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reveal Secret - RUThere</title>
+    <title>{_t("reveal.page_title", lang)}</title>
     <link rel="icon" href="/static/favicon.ico" sizes="any">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <style>
@@ -1231,24 +1331,29 @@ def _reveal_page(sender_name: str, secret_title: str,
 </head>
 <body>
     <div class="card">
-        <h1>A Message For You</h1>
-        <p class="subtitle">From {sender_name}</p>
+        <h1>{_t("reveal.heading", lang)}</h1>
+        <p class="subtitle">{_t("reveal.from", lang)} {sender_name}</p>
 
         <div class="e2e-badge">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
             </svg>
-            End-to-end encrypted
+            {_t("reveal.e2e_badge", lang)}
         </div>
 
         <div id="passphrase-form">
-            <label for="passphrase">Enter the passphrase that {sender_name} shared with you</label>
-            <input type="password" id="passphrase" placeholder="Passphrase" autofocus
-                   onkeydown="if(event.key==='Enter')decryptSecret()">
+            <label for="passphrase">{passphrase_label}</label>
+            <div style="position:relative;">
+                <input type="password" id="passphrase" placeholder="{_t("reveal.passphrase_placeholder", lang)}" autofocus
+                       style="padding-right:48px;"
+                       onkeydown="if(event.key==='Enter')decryptSecret()">
+                <button type="button" onclick="togglePass()" id="reveal-pass-toggle"
+                        style="position:absolute;right:12px;top:14px;background:none;border:none;color:#64748b;cursor:pointer;font-size:13px;">{_t("common.show", lang)}</button>
+            </div>
             <div id="error" class="error"></div>
             <button class="btn btn-primary" onclick="decryptSecret()" id="decrypt-btn">
                 <span class="spinner" id="spinner"></span>
-                Decrypt Message
+                {_t("reveal.decrypt_btn", lang)}
             </button>
         </div>
 
@@ -1258,9 +1363,8 @@ def _reveal_page(sender_name: str, secret_title: str,
         </div>
 
         <p class="info">
-            This message is decrypted entirely in your browser. The server cannot read it.
-            <br>To verify: open your browser's Developer Tools &gt; Network tab and observe
-            that no plaintext or passphrase is sent to the server.
+            {_t("reveal.info_line1", lang)}
+            <br>{_t("reveal.info_line2", lang)}
         </p>
     </div>
 
@@ -1272,6 +1376,18 @@ def _reveal_page(sender_name: str, secret_title: str,
             encryption_tag: "{encryption_tag}",
             encryption_salt: "{encryption_salt}",
         }};
+
+        function togglePass() {{
+            const input = document.getElementById('passphrase');
+            const btn = document.getElementById('reveal-pass-toggle');
+            if (input.type === 'password') {{
+                input.type = 'text';
+                btn.textContent = '{_t("common.hide", lang)}';
+            }} else {{
+                input.type = 'password';
+                btn.textContent = '{_t("common.show", lang)}';
+            }}
+        }}
 
         async function decryptSecret() {{
             const passphrase = document.getElementById('passphrase').value;
@@ -1298,7 +1414,7 @@ def _reveal_page(sender_name: str, secret_title: str,
                 document.getElementById('secret-content').style.display = 'block';
                 document.getElementById('secret-content').textContent = plaintext;
             }} catch (e) {{
-                error.textContent = 'Incorrect passphrase. Please try again.';
+                error.textContent = '{_t("reveal.wrong_passphrase", lang)}';
                 error.style.display = 'block';
                 btn.disabled = false;
                 spinner.className = 'spinner';
@@ -1309,10 +1425,10 @@ def _reveal_page(sender_name: str, secret_title: str,
 </html>"""
 
 
-def _reveal_error_page(title: str, message: str) -> str:
+def _reveal_error_page(title: str, message: str, lang: str = "en") -> str:
     """Render an error page for invalid/expired reveal links."""
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{lang}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1342,29 +1458,30 @@ def _reveal_error_page(title: str, message: str) -> str:
 </html>"""
 
 
-def _simulate_page(user: User) -> str:
+def _simulate_page(user: User, lang: str = "en") -> str:
+    status_value = _t("dashboard.active", lang) if user.is_active else _t("dashboard.paused", lang)
     content = f"""
     <div class="container">
-        <h1>Trigger Simulation</h1>
-        <p class="subtitle">Walk through the full dead man's switch sequence step by step with real notifications</p>
+        <h1>{_t("simulate.title", lang)}</h1>
+        <p class="subtitle">{_t("simulate.subtitle", lang)}</p>
 
         <div id="alert" class="alert"></div>
 
         <div class="card" style="margin-bottom:24px;">
             <div class="form-row">
-                <label for="test_email">Test email (receive trigger deliveries here instead of actual recipients)</label>
+                <label for="test_email">{_t("simulate.test_email_label", lang)}</label>
                 <input type="email" id="test_email" value="{user.email}" placeholder="{user.email}">
-                <small>Leave as your email to receive simulation deliveries. Actual recipients will NOT be contacted.</small>
+                <small>{_t("simulate.test_email_desc", lang)}</small>
             </div>
         </div>
 
         <div class="card" style="border-left:3px solid #334155;margin-bottom:2px;border-radius:12px 12px 4px 4px;" id="step1-card">
             <div class="flex-between">
                 <div>
-                    <strong style="color:#f1f5f9;">Step 1: Send Heartbeat</strong>
-                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">Sends a real heartbeat check-in via ntfy + email. You can tap the link to test the response flow, or skip to step 2.</p>
+                    <strong style="color:#f1f5f9;">{_t("simulate.step1_title", lang)}</strong>
+                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">{_t("simulate.step1_desc", lang)}</p>
                 </div>
-                <button class="btn btn-primary btn-sm" onclick="runStep('step1-send-heartbeat')" id="btn-step1">Send</button>
+                <button class="btn btn-primary btn-sm" onclick="runStep('step1-send-heartbeat')" id="btn-step1">{_t("simulate.step1_btn", lang)}</button>
             </div>
             <div id="step1-result" style="display:none;margin-top:12px;padding:12px;background:#0f172a;border-radius:8px;font-size:13px;"></div>
         </div>
@@ -1372,10 +1489,10 @@ def _simulate_page(user: User) -> str:
         <div class="card" style="border-left:3px solid #334155;margin-bottom:2px;border-radius:4px;" id="step2-card">
             <div class="flex-between">
                 <div>
-                    <strong style="color:#f1f5f9;">Step 2: Escalate to Email</strong>
-                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">Simulates the response window expiring. Sends an escalation email with the same check-in link.</p>
+                    <strong style="color:#f1f5f9;">{_t("simulate.step2_title", lang)}</strong>
+                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">{_t("simulate.step2_desc", lang)}</p>
                 </div>
-                <button class="btn btn-secondary btn-sm" onclick="runStep('step2-escalate')" id="btn-step2">Escalate</button>
+                <button class="btn btn-secondary btn-sm" onclick="runStep('step2-escalate')" id="btn-step2">{_t("simulate.step2_btn", lang)}</button>
             </div>
             <div id="step2-result" style="display:none;margin-top:12px;padding:12px;background:#0f172a;border-radius:8px;font-size:13px;"></div>
         </div>
@@ -1383,10 +1500,10 @@ def _simulate_page(user: User) -> str:
         <div class="card" style="border-left:3px solid #f59e0b;margin-bottom:2px;border-radius:4px;" id="step3-card">
             <div class="flex-between">
                 <div>
-                    <strong style="color:#f1f5f9;">Step 3: Mark as Missed</strong>
-                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">Marks the heartbeat as missed and increments the consecutive miss counter. Repeat steps 1-3 to reach the threshold.</p>
+                    <strong style="color:#f1f5f9;">{_t("simulate.step3_title", lang)}</strong>
+                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">{_t("simulate.step3_desc", lang)}</p>
                 </div>
-                <button class="btn btn-secondary btn-sm" style="background:#f59e0b;color:#0f172a;" onclick="runStep('step3-miss')" id="btn-step3">Miss</button>
+                <button class="btn btn-secondary btn-sm" style="background:#f59e0b;color:#0f172a;" onclick="runStep('step3-miss')" id="btn-step3">{_t("simulate.step3_btn", lang)}</button>
             </div>
             <div id="step3-result" style="display:none;margin-top:12px;padding:12px;background:#0f172a;border-radius:8px;font-size:13px;"></div>
         </div>
@@ -1394,10 +1511,10 @@ def _simulate_page(user: User) -> str:
         <div class="card" style="border-left:3px solid #ef4444;margin-bottom:16px;border-radius:4px 4px 12px 12px;" id="step4-card">
             <div class="flex-between">
                 <div>
-                    <strong style="color:#f1f5f9;">Step 4: Fire Trigger</strong>
-                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">Delivers all secrets to recipients (or your test email). Server-encrypted secrets are emailed as plaintext. E2E secrets get a reveal link.</p>
+                    <strong style="color:#f1f5f9;">{_t("simulate.step4_title", lang)}</strong>
+                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">{_t("simulate.step4_desc", lang)}</p>
                 </div>
-                <button class="btn btn-danger btn-sm" onclick="fireTrigger()" id="btn-step4">Trigger</button>
+                <button class="btn btn-danger btn-sm" onclick="fireTrigger()" id="btn-step4">{_t("simulate.step4_btn", lang)}</button>
             </div>
             <div id="step4-result" style="display:none;margin-top:12px;padding:12px;background:#0f172a;border-radius:8px;font-size:13px;"></div>
         </div>
@@ -1405,14 +1522,14 @@ def _simulate_page(user: User) -> str:
         <div class="card" style="background:#0f172a;border:1px dashed #334155;">
             <div class="flex-between">
                 <div>
-                    <strong style="color:#94a3b8;">Current State</strong>
+                    <strong style="color:#94a3b8;">{_t("simulate.current_state", lang)}</strong>
                     <p style="font-size:14px;margin-top:4px;">
-                        Simulation misses: <strong id="miss-count">0</strong> / <strong>{user.missed_threshold}</strong>
+                        {_t("simulate.sim_misses", lang)} <strong id="miss-count">0</strong> / <strong>{user.missed_threshold}</strong>
                         &nbsp;&nbsp;|&nbsp;&nbsp;
-                        Status: <strong id="user-status">{'Active' if user.is_active else 'Paused'}</strong>
+                        {_t("simulate.status", lang)} <strong id="user-status">{status_value}</strong>
                     </p>
                 </div>
-                <button class="btn btn-secondary btn-sm" onclick="resetSim()">Reset</button>
+                <button class="btn btn-secondary btn-sm" onclick="resetSim()">{_t("simulate.reset", lang)}</button>
             </div>
         </div>
     </div>
@@ -1424,7 +1541,7 @@ def _simulate_page(user: User) -> str:
             const origText = btnEl.textContent;
 
             btnEl.disabled = true;
-            btnEl.textContent = 'Processing...';
+            btnEl.textContent = '{_t("simulate.processing", lang)}';
 
             try {{
                 const data = await apiCall('POST', '/api/simulate/' + endpoint);
@@ -1445,20 +1562,20 @@ def _simulate_page(user: User) -> str:
             const resEl = document.getElementById('step4-result');
             const origText = btn.textContent;
             btn.disabled = true;
-            btn.textContent = 'Triggering...';
+            btn.textContent = '{_t("simulate.triggering", lang)}';
 
             try {{
                 const testEmail = document.getElementById('test_email').value || null;
                 const data = await apiCall('POST', '/api/simulate/step4-trigger', {{
                     test_email: testEmail,
                 }});
-                let html = '<span style="color:#ef4444;font-weight:600;">TRIGGER FIRED</span><br>' + data.description + '<br><br>';
+                let html = '<span style="color:#ef4444;font-weight:600;">{_t("simulate.trigger_fired", lang)}</span><br>' + data.description + '<br><br>';
                 for (const d of data.deliveries) {{
                     const icon = d.sent ? '&#10003;' : '&#10007;';
                     const color = d.sent ? '#34d399' : '#f87171';
                     html += '<div style="margin:4px 0;"><span style="color:' + color + ';">' + icon + '</span> '
                          + d.recipient + ' (' + d.email + ') &mdash; ' + d.secret + ' [' + d.type + ']';
-                    if (d.reveal_url) html += ' <a href="' + d.reveal_url + '" target="_blank" style="color:#22c55e;">Open reveal link</a>';
+                    if (d.reveal_url) html += ' <a href="' + d.reveal_url + '" target="_blank" style="color:#22c55e;">{_t("simulate.open_reveal", lang)}</a>';
                     html += '</div>';
                 }}
                 if (data.note) html += '<br><small style="color:#f59e0b;">' + data.note + '</small>';
@@ -1476,15 +1593,15 @@ def _simulate_page(user: User) -> str:
             try {{
                 const data = await apiCall('POST', '/api/simulate/reset');
                 document.getElementById('miss-count').textContent = '0';
-                document.getElementById('user-status').textContent = 'Active';
+                document.getElementById('user-status').textContent = '{_t("dashboard.active", lang)}';
                 for (let i = 1; i <= 4; i++) {{
                     const el = document.getElementById('step' + i + '-result');
                     if (el) el.style.display = 'none';
                 }}
-                showAlert('alert', 'Simulation reset. Miss counter cleared.', false);
+                showAlert('alert', '{_t("simulate.reset_done", lang)}', false);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
         }}
     </script>"""
-    return _base_html("Simulate", content, user)
+    return _base_html(_t("simulate.title", lang), content, user, lang=lang)
