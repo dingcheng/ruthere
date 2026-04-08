@@ -63,18 +63,25 @@ async def dashboard(request: Request, db: AsyncSession = Depends(get_db)):
     )
     recipients_count = recipients_result.scalar()
 
-    # Recent heartbeat logs
+    # Recent heartbeat logs (exclude simulation and test entries)
     logs_result = await db.execute(
         select(HeartbeatLog)
-        .where(HeartbeatLog.user_id == user.id)
+        .where(
+            HeartbeatLog.user_id == user.id,
+            ~HeartbeatLog.response_token.like("sim-%"),
+            ~HeartbeatLog.response_token.like("test-%"),
+        )
         .order_by(HeartbeatLog.sent_at.desc())
         .limit(10)
     )
     recent_logs = logs_result.scalars().all()
 
-    # Trigger logs
+    # Trigger logs (exclude simulation entries)
     triggers_result = await db.execute(
-        select(func.count()).select_from(TriggerLog).where(TriggerLog.user_id == user.id)
+        select(func.count()).select_from(TriggerLog).where(
+            TriggerLog.user_id == user.id,
+            ~TriggerLog.action_taken.like("[SIMULATION]%"),
+        )
     )
     triggers_count = triggers_result.scalar()
 
@@ -120,6 +127,14 @@ async def settings_page(request: Request, db: AsyncSession = Depends(get_db)):
     if not user:
         return RedirectResponse(url="/login", status_code=302)
     return _settings_page(user)
+
+
+@router.get("/simulate", response_class=HTMLResponse)
+async def simulate_page(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await _get_web_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    return _simulate_page(user)
 
 
 @router.get("/reveal/{token}", response_class=HTMLResponse)
@@ -183,6 +198,7 @@ def _base_html(title: str, content: str, user: User | None = None) -> str:
                 <a href="/dashboard">Dashboard</a>
                 <a href="/manage/secrets">Secrets</a>
                 <a href="/manage/recipients">Recipients</a>
+                <a href="/simulate">Simulate</a>
                 <a href="/settings">Settings</a>
                 <a href="#" onclick="logout()">Logout</a>
             </div>
@@ -563,14 +579,17 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
             </div>
         </div>
 
-        <div class="flex-between mb-4">
-            <div class="flex">
-                <h2>Recent Heartbeats</h2>
+        <div style="margin-bottom:16px;">
+            <div class="flex" style="margin-bottom:8px;">
+                <h2 style="margin-bottom:0;">Recent Heartbeats</h2>
                 <span id="tz-toggle" onclick="toggleTimezone()" 
                       style="cursor:pointer;background:#334155;padding:3px 10px;border-radius:9999px;font-size:12px;font-weight:600;color:#22c55e;user-select:none;"
                       title="Click to switch between local and UTC">{tz_abbrev}</span>
             </div>
-            <button class="btn btn-secondary btn-sm" onclick="testHeartbeat()">Send Test Heartbeat</button>
+            <div class="flex" style="gap:8px;align-items:center;">
+                <button class="btn btn-secondary btn-sm" onclick="testHeartbeat()" style="white-space:nowrap;">Send Test</button>
+                <span style="color:#64748b;font-size:12px;">Test heartbeats won't count as a miss if unresponded</span>
+            </div>
         </div>
         <div id="hb-alert" class="alert"></div>
 
@@ -1321,3 +1340,151 @@ def _reveal_error_page(title: str, message: str) -> str:
     </div>
 </body>
 </html>"""
+
+
+def _simulate_page(user: User) -> str:
+    content = f"""
+    <div class="container">
+        <h1>Trigger Simulation</h1>
+        <p class="subtitle">Walk through the full dead man's switch sequence step by step with real notifications</p>
+
+        <div id="alert" class="alert"></div>
+
+        <div class="card" style="margin-bottom:24px;">
+            <div class="form-row">
+                <label for="test_email">Test email (receive trigger deliveries here instead of actual recipients)</label>
+                <input type="email" id="test_email" value="{user.email}" placeholder="{user.email}">
+                <small>Leave as your email to receive simulation deliveries. Actual recipients will NOT be contacted.</small>
+            </div>
+        </div>
+
+        <div class="card" style="border-left:3px solid #334155;margin-bottom:2px;border-radius:12px 12px 4px 4px;" id="step1-card">
+            <div class="flex-between">
+                <div>
+                    <strong style="color:#f1f5f9;">Step 1: Send Heartbeat</strong>
+                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">Sends a real heartbeat check-in via ntfy + email. You can tap the link to test the response flow, or skip to step 2.</p>
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="runStep('step1-send-heartbeat')" id="btn-step1">Send</button>
+            </div>
+            <div id="step1-result" style="display:none;margin-top:12px;padding:12px;background:#0f172a;border-radius:8px;font-size:13px;"></div>
+        </div>
+
+        <div class="card" style="border-left:3px solid #334155;margin-bottom:2px;border-radius:4px;" id="step2-card">
+            <div class="flex-between">
+                <div>
+                    <strong style="color:#f1f5f9;">Step 2: Escalate to Email</strong>
+                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">Simulates the response window expiring. Sends an escalation email with the same check-in link.</p>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="runStep('step2-escalate')" id="btn-step2">Escalate</button>
+            </div>
+            <div id="step2-result" style="display:none;margin-top:12px;padding:12px;background:#0f172a;border-radius:8px;font-size:13px;"></div>
+        </div>
+
+        <div class="card" style="border-left:3px solid #f59e0b;margin-bottom:2px;border-radius:4px;" id="step3-card">
+            <div class="flex-between">
+                <div>
+                    <strong style="color:#f1f5f9;">Step 3: Mark as Missed</strong>
+                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">Marks the heartbeat as missed and increments the consecutive miss counter. Repeat steps 1-3 to reach the threshold.</p>
+                </div>
+                <button class="btn btn-secondary btn-sm" style="background:#f59e0b;color:#0f172a;" onclick="runStep('step3-miss')" id="btn-step3">Miss</button>
+            </div>
+            <div id="step3-result" style="display:none;margin-top:12px;padding:12px;background:#0f172a;border-radius:8px;font-size:13px;"></div>
+        </div>
+
+        <div class="card" style="border-left:3px solid #ef4444;margin-bottom:16px;border-radius:4px 4px 12px 12px;" id="step4-card">
+            <div class="flex-between">
+                <div>
+                    <strong style="color:#f1f5f9;">Step 4: Fire Trigger</strong>
+                    <p style="color:#94a3b8;font-size:13px;margin-top:4px;">Delivers all secrets to recipients (or your test email). Server-encrypted secrets are emailed as plaintext. E2E secrets get a reveal link.</p>
+                </div>
+                <button class="btn btn-danger btn-sm" onclick="fireTrigger()" id="btn-step4">Trigger</button>
+            </div>
+            <div id="step4-result" style="display:none;margin-top:12px;padding:12px;background:#0f172a;border-radius:8px;font-size:13px;"></div>
+        </div>
+
+        <div class="card" style="background:#0f172a;border:1px dashed #334155;">
+            <div class="flex-between">
+                <div>
+                    <strong style="color:#94a3b8;">Current State</strong>
+                    <p style="font-size:14px;margin-top:4px;">
+                        Simulation misses: <strong id="miss-count">0</strong> / <strong>{user.missed_threshold}</strong>
+                        &nbsp;&nbsp;|&nbsp;&nbsp;
+                        Status: <strong id="user-status">{'Active' if user.is_active else 'Paused'}</strong>
+                    </p>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="resetSim()">Reset</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        async function runStep(endpoint) {{
+            const stepNum = endpoint.match(/step(\\d)/)[1];
+            const btnEl = document.getElementById('btn-step' + stepNum);
+            const resEl = document.getElementById('step' + stepNum + '-result');
+            const origText = btnEl.textContent;
+
+            btnEl.disabled = true;
+            btnEl.textContent = 'Processing...';
+
+            try {{
+                const data = await apiCall('POST', '/api/simulate/' + endpoint);
+                resEl.innerHTML = '<span style="color:#34d399;">' + data.step_name + '</span>: ' + data.description;
+                if (data.details) resEl.innerHTML += '<br><small style="color:#64748b;">' + data.details + '</small>';
+                resEl.style.display = 'block';
+                document.getElementById('miss-count').textContent = data.sim_misses;
+            }} catch (err) {{
+                showAlert('alert', err.message, true);
+            }}
+
+            btnEl.disabled = false;
+            btnEl.textContent = origText;
+        }}
+
+        async function fireTrigger() {{
+            const btn = document.getElementById('btn-step4');
+            const resEl = document.getElementById('step4-result');
+            const origText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Triggering...';
+
+            try {{
+                const testEmail = document.getElementById('test_email').value || null;
+                const data = await apiCall('POST', '/api/simulate/step4-trigger', {{
+                    test_email: testEmail,
+                }});
+                let html = '<span style="color:#ef4444;font-weight:600;">TRIGGER FIRED</span><br>' + data.description + '<br><br>';
+                for (const d of data.deliveries) {{
+                    const icon = d.sent ? '&#10003;' : '&#10007;';
+                    const color = d.sent ? '#34d399' : '#f87171';
+                    html += '<div style="margin:4px 0;"><span style="color:' + color + ';">' + icon + '</span> '
+                         + d.recipient + ' (' + d.email + ') &mdash; ' + d.secret + ' [' + d.type + ']';
+                    if (d.reveal_url) html += ' <a href="' + d.reveal_url + '" target="_blank" style="color:#22c55e;">Open reveal link</a>';
+                    html += '</div>';
+                }}
+                if (data.note) html += '<br><small style="color:#f59e0b;">' + data.note + '</small>';
+                resEl.innerHTML = html;
+                resEl.style.display = 'block';
+            }} catch (err) {{
+                showAlert('alert', err.message, true);
+            }}
+
+            btn.disabled = false;
+            btn.textContent = origText;
+        }}
+
+        async function resetSim() {{
+            try {{
+                const data = await apiCall('POST', '/api/simulate/reset');
+                document.getElementById('miss-count').textContent = '0';
+                document.getElementById('user-status').textContent = 'Active';
+                for (let i = 1; i <= 4; i++) {{
+                    const el = document.getElementById('step' + i + '-result');
+                    if (el) el.style.display = 'none';
+                }}
+                showAlert('alert', 'Simulation reset. Miss counter cleared.', false);
+            }} catch (err) {{
+                showAlert('alert', err.message, true);
+            }}
+        }}
+    </script>"""
+    return _base_html("Simulate", content, user)

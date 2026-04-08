@@ -8,7 +8,7 @@ from app.config import get_settings
 from app.database import init_db
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.services.notify import close_http_client
-from app.api import auth, secrets, recipients, heartbeat, web
+from app.api import auth, secrets, recipients, heartbeat, web, simulate
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +45,7 @@ app.include_router(auth.router)
 app.include_router(secrets.router)
 app.include_router(recipients.router)
 app.include_router(heartbeat.router)
+app.include_router(simulate.router)
 
 # Web UI routes
 app.include_router(web.router)

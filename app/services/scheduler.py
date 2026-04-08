@@ -221,12 +221,15 @@ async def _check_outstanding_heartbeats(user: User, db):
     cutoff = datetime.now(timezone.utc) - window
 
     # Find heartbeats that were sent but never responded to and are past the response window
+    # Exclude test- and sim- prefixed tokens (manual tests and simulations)
     result = await db.execute(
         select(HeartbeatLog).where(
             and_(
                 HeartbeatLog.user_id == user.id,
                 HeartbeatLog.status.in_(["sent", "escalated"]),
                 HeartbeatLog.sent_at < cutoff,
+                ~HeartbeatLog.response_token.like("test-%"),
+                ~HeartbeatLog.response_token.like("sim-%"),
             )
         )
     )

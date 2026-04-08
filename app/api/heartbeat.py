@@ -203,7 +203,11 @@ async def get_heartbeat_history(
 ):
     result = await db.execute(
         select(HeartbeatLog)
-        .where(HeartbeatLog.user_id == user.id)
+        .where(
+            HeartbeatLog.user_id == user.id,
+            ~HeartbeatLog.response_token.like("sim-%"),
+            ~HeartbeatLog.response_token.like("test-%"),
+        )
         .order_by(HeartbeatLog.sent_at.desc())
         .limit(limit)
     )
@@ -225,14 +229,34 @@ async def test_heartbeat(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Manually trigger a heartbeat for testing."""
-    from app.services.scheduler import _prepare_heartbeat, _send_notification
-    notification = await _prepare_heartbeat(user, db)
-    await db.commit()
-    if notification:
-        await _send_notification(notification)
-        return {"message": "Test heartbeat sent"}
-    return {"message": "Heartbeat skipped (outside active hours or inactive)"}
+    """Manually trigger a test heartbeat. Uses 'test-' prefixed token so it won't
+    be escalated, marked as missed, or shown on the dashboard."""
+    import uuid
+    from app.models.models import HeartbeatLog
+    from app.services.notify import send_ntfy_push, send_heartbeat_email
+    from app.config import get_settings
+
+    token = f"test-{uuid.uuid4()}"
+    hb = HeartbeatLog(user_id=user.id, response_token=token, status="sent")
+    db.add(hb)
+    await db.flush()
+
+    settings = get_settings()
+    response_url = f"{settings.base_url}/heartbeat/respond/{token}"
+
+    sent = False
+    if user.ntfy_topic:
+        sent = await send_ntfy_push(
+            topic=user.ntfy_topic,
+            title="[TEST] RUThere? Heartbeat Check-in",
+            message="This is a test heartbeat. Tap to test the response flow.",
+            click_url=response_url,
+        )
+
+    if not sent:
+        await send_heartbeat_email(user.email, response_url)
+
+    return {"message": "Test heartbeat sent. It won't count as a miss if unresponded."}
 
 
 def _response_page(title: str, message: str, success: bool = True) -> str:

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     default_missed_threshold: int = 3
     default_response_window_hours: int = 4
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 @lru_cache
