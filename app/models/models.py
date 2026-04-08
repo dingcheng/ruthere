@@ -127,7 +127,13 @@ class TriggerLog(Base):
 
 
 class RevealToken(Base):
-    """One-time tokens for recipients to access E2E encrypted secrets after trigger fires."""
+    """Permanent tokens for recipients to access E2E encrypted secrets after trigger fires.
+    
+    Security model: The passphrase is the access control, not the token URL.
+    The token is just an identifier that maps to the right ciphertext.
+    Tokens do not expire — the secret remains accessible as long as the recipient
+    has the passphrase.
+    """
     __tablename__ = "reveal_tokens"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -135,7 +141,7 @@ class RevealToken(Base):
     recipient_id: Mapped[str] = mapped_column(String(36), ForeignKey("recipients.id"), nullable=False)
     token: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # deprecated, kept for backward compat
     accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships

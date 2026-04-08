@@ -184,15 +184,6 @@ async def reveal_page(token: str, request: Request, db: AsyncSession = Depends(g
             lang=lang,
         ), status_code=404)
 
-    now = datetime.now(timezone.utc)
-    expires = reveal.expires_at.replace(tzinfo=timezone.utc) if reveal.expires_at.tzinfo is None else reveal.expires_at
-    if expires < now:
-        return HTMLResponse(content=_reveal_error_page(
-            _t("reveal.error_expired_title", lang),
-            _t("reveal.error_expired_msg", lang),
-            lang=lang,
-        ), status_code=410)
-
     # Load secret and sender info
     secret_result = await db.execute(select(Secret).where(Secret.id == reveal.secret_id))
     secret = secret_result.scalar_one_or_none()
@@ -210,7 +201,7 @@ async def reveal_page(token: str, request: Request, db: AsyncSession = Depends(g
 
     # Mark as accessed
     if not reveal.accessed_at:
-        reveal.accessed_at = now
+        reveal.accessed_at = datetime.now(timezone.utc)
 
     return HTMLResponse(content=_reveal_page(
         sender_name=sender_name,
@@ -231,7 +222,7 @@ def _base_html(title: str, content: str, user: User | None = None, lang: str = "
         nav = f"""
         <nav>
             <div class="nav-left">
-                <a href="/dashboard" class="logo">RUThere</a>
+                <a href="/dashboard" class="logo">{_t("app.name", lang)}</a>
             </div>
             <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="{_t('nav.menu', lang)}">
                 <span></span><span></span><span></span>
@@ -250,7 +241,7 @@ def _base_html(title: str, content: str, user: User | None = None, lang: str = "
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title} - RUThere</title>
+    <title>{title} - {_t("app.name", lang)}</title>
     <link rel="icon" href="/static/favicon.ico" sizes="any">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
@@ -1432,7 +1423,7 @@ def _reveal_error_page(title: str, message: str, lang: str = "en") -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title} - RUThere</title>
+    <title>{title} - {_t("app.name", lang)}</title>
     <link rel="icon" href="/static/favicon.ico" sizes="any">
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}

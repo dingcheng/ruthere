@@ -1,14 +1,17 @@
-"""Notification service: iMessage + ntfy.sh push + Resend email."""
+"""Notification service: iMessage + ntfy.sh push + Resend email.
+
+All user-facing strings use the i18n module for translation.
+"""
 import asyncio
 import logging
 import subprocess
 import httpx
 from app.config import get_settings
+from app.i18n import t
 
 logger = logging.getLogger(__name__)
 
 # Shared HTTP client with connection pooling — reused across all notification calls.
-# Eliminates per-request TLS handshake overhead (~100ms saved per call).
 _http_client: httpx.AsyncClient | None = None
 
 
@@ -36,18 +39,7 @@ async def close_http_client():
 
 
 async def send_imessage(phone_number: str, message: str) -> bool:
-    """Send an iMessage via macOS Messages app using osascript.
-    
-    Only works when the server is running on a Mac with Messages signed in.
-    
-    Args:
-        phone_number: The recipient's phone number or Apple ID email.
-        message: The message text to send.
-    
-    Returns:
-        True if sent successfully, False otherwise.
-    """
-    # Escape double quotes and backslashes in the message
+    """Send an iMessage via macOS Messages app using osascript."""
     escaped_message = message.replace("\\", "\\\\").replace('"', '\\"')
     escaped_recipient = phone_number.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -79,43 +71,35 @@ async def send_imessage(phone_number: str, message: str) -> bool:
 
 
 async def send_heartbeat_imessage(phone_number: str, response_url: str) -> bool:
-    """Send a heartbeat check-in via iMessage as two messages:
-    1. The check-in prompt
-    2. Just the link (for easy tapping)
-    """
+    """Send a heartbeat check-in via iMessage as two messages."""
     msg_sent = await send_imessage(phone_number, "RUThere? Heartbeat check-in. Tap the link below to confirm you're OK.")
     if msg_sent:
         await send_imessage(phone_number, response_url)
     return msg_sent
 
 
-async def send_ntfy_push(topic: str, title: str, message: str, click_url: str | None = None) -> bool:
-    """Send a push notification via ntfy.sh.
-    
-    Args:
-        topic: The user's unique ntfy topic.
-        title: Notification title.
-        message: Notification body.
-        click_url: URL to open when user taps the notification.
-    
-    Returns:
-        True if sent successfully, False otherwise.
-    """
+async def send_ntfy_push(topic: str, title: str, message: str, click_url: str | None = None, lang: str = "en") -> bool:
+    """Send a push notification via ntfy.sh using the JSON API (supports UTF-8)."""
     settings = get_settings()
-    url = f"{settings.ntfy_base_url}/{topic}"
+    url = f"{settings.ntfy_base_url}"
 
-    headers = {
-        "Title": title,
-        "Priority": "high",
-        "Tags": "heartbeat",
+    payload = {
+        "topic": topic,
+        "title": title,
+        "message": message,
+        "priority": 4,  # high
+        "tags": ["heartbeat"],
     }
     if click_url:
-        headers["Click"] = click_url
-        headers["Actions"] = f"http, I'm here, {click_url}, clear=true"
+        payload["click"] = click_url
+        action_label = t("ntfy.action_label", lang)
+        payload["actions"] = [
+            {"action": "http", "label": action_label, "url": click_url, "clear": True}
+        ]
 
     try:
         client = get_http_client()
-        resp = await client.post(url, content=message, headers=headers)
+        resp = await client.post(url, json=payload)
         resp.raise_for_status()
         logger.info(f"ntfy push sent to topic '{topic}'")
         return True
@@ -125,16 +109,7 @@ async def send_ntfy_push(topic: str, title: str, message: str, click_url: str | 
 
 
 async def send_email(to: str, subject: str, body_html: str) -> bool:
-    """Send an email via Resend API.
-    
-    Args:
-        to: Recipient email address.
-        subject: Email subject.
-        body_html: HTML body content.
-    
-    Returns:
-        True if sent successfully, False otherwise.
-    """
+    """Send an email via Resend API."""
     settings = get_settings()
 
     if not settings.resend_api_key or settings.resend_api_key.startswith("re_your"):
@@ -166,47 +141,43 @@ async def send_email(to: str, subject: str, body_html: str) -> bool:
         return False
 
 
-async def send_heartbeat_email(to: str, response_url: str) -> bool:
+async def send_heartbeat_email(to: str, response_url: str, lang: str = "en") -> bool:
     """Send heartbeat check-in email with one-click response button."""
-    subject = "RUThere? - Heartbeat Check-in"
+    subject = t("email.heartbeat_subject", lang)
     body_html = f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
-        <h2 style="color: #333;">Heartbeat Check-in</h2>
-        <p style="color: #555; font-size: 16px;">This is your periodic check-in from RUThere. Please confirm you're okay by clicking the button below.</p>
+        <h2 style="color: #333;">{t("email.heartbeat_heading", lang)}</h2>
+        <p style="color: #555; font-size: 16px;">{t("email.heartbeat_body", lang)}</p>
         <a href="{response_url}" 
            style="display: inline-block; background: #22c55e; color: white; padding: 14px 28px; 
                   text-decoration: none; border-radius: 8px; font-size: 18px; font-weight: 600; margin: 16px 0;">
-            I'm Here
+            {t("email.heartbeat_btn", lang)}
         </a>
         <p style="color: #999; font-size: 13px; margin-top: 24px;">
-            If you don't respond, your designated contacts may be notified according to your settings.
+            {t("email.heartbeat_footer", lang)}
         </p>
     </div>
     """
     return await send_email(to, subject, body_html)
 
 
-async def send_secret_email(to: str, recipient_name: str, sender_name: str, secret_title: str, secret_content: str) -> bool:
+async def send_secret_email(to: str, recipient_name: str, sender_name: str, secret_title: str, secret_content: str, lang: str = "en") -> bool:
     """Send a triggered secret to a recipient."""
-    subject = f"RUThere - Message from {sender_name}"
+    subject = t("email.secret_subject", lang).replace("{sender_name}", sender_name)
+    greeting = t("email.secret_greeting", lang).replace("{recipient_name}", recipient_name)
+    body_text = t("email.secret_body", lang).replace("{sender_name}", sender_name)
+    footer = t("app.automated_message", lang)
+
     body_html = f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <h2 style="color: #333;">A Message For You</h2>
-        <p style="color: #555; font-size: 16px;">
-            Dear {recipient_name},
-        </p>
-        <p style="color: #555; font-size: 16px;">
-            {sender_name} set up a heartbeat check-in system and designated you as a recipient 
-            of the following message. This message has been automatically delivered because 
-            they did not respond to multiple check-in requests.
-        </p>
+        <h2 style="color: #333;">{t("email.secret_heading", lang)}</h2>
+        <p style="color: #555; font-size: 16px;">{greeting}</p>
+        <p style="color: #555; font-size: 16px;">{body_text}</p>
         <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 20px; margin: 20px 0;">
             <h3 style="color: #333; margin-top: 0;">{secret_title}</h3>
             <div style="color: #333; font-size: 15px; white-space: pre-wrap;">{secret_content}</div>
         </div>
-        <p style="color: #999; font-size: 13px; margin-top: 24px;">
-            This is an automated message from the RUThere heartbeat system.
-        </p>
+        <p style="color: #999; font-size: 13px; margin-top: 24px;">{footer}</p>
     </div>
     """
     return await send_email(to, subject, body_html)
@@ -216,51 +187,39 @@ async def send_recipient_invite_email(
     to: str,
     recipient_name: str,
     sender_name: str,
+    lang: str = "en",
 ) -> bool:
-    """Send an invite/notification email to a newly added recipient.
-    
-    Explains what RUThere is, that they've been designated as a recipient,
-    and what to expect if the switch triggers. Does not reveal any details
-    about the secret content or title.
-    """
-    subject = f"{sender_name} has designated you as a trusted contact on RUThere"
+    """Send an invite/notification email to a newly added recipient."""
+    subject = t("email.invite_subject", lang).replace("{sender_name}", sender_name)
+    intro = t("email.invite_intro", lang).replace("{sender_name}", sender_name)
+    what_body = t("email.invite_what_body", lang).replace("{sender_name}", sender_name)
+    action_meaning = t("email.invite_action_meaning", lang).replace("{sender_name}", sender_name)
+    questions = t("email.invite_questions", lang).replace("{sender_name}", sender_name)
+    greeting = t("email.invite_greeting", lang).replace("{recipient_name}", recipient_name)
+    footer = t("app.automated_message", lang)
+
     body_html = f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <h2 style="color: #333;">You've Been Designated as a Trusted Contact</h2>
-        <p style="color: #555; font-size: 16px;">
-            Dear {recipient_name},
-        </p>
-        <p style="color: #555; font-size: 16px;">
-            <strong>{sender_name}</strong> has added you as a trusted contact on
-            <strong>RUThere</strong>, a personal heartbeat check-in system.
-        </p>
+        <h2 style="color: #333;">{t("email.invite_heading", lang)}</h2>
+        <p style="color: #555; font-size: 16px;">{greeting}</p>
+        <p style="color: #555; font-size: 16px;">{intro}</p>
 
         <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
-            <h3 style="color: #166534; margin-top: 0;">What does this mean?</h3>
-            <p style="color: #555; font-size: 15px; margin-bottom: 0;">
-                RUThere periodically sends {sender_name} a check-in prompt. If they respond,
-                nothing happens. If they fail to respond to multiple consecutive check-ins,
-                the system will automatically deliver an important message to you via email.
-            </p>
+            <h3 style="color: #166534; margin-top: 0;">{t("email.invite_what_title", lang)}</h3>
+            <p style="color: #555; font-size: 15px; margin-bottom: 0;">{what_body}</p>
         </div>
 
         <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 20px; margin: 20px 0;">
-            <h3 style="color: #333; margin-top: 0;">What you need to do</h3>
+            <h3 style="color: #333; margin-top: 0;">{t("email.invite_action_title", lang)}</h3>
             <ul style="color: #555; font-size: 15px; padding-left: 20px;">
-                <li style="margin-bottom: 8px;"><strong>Nothing right now.</strong> There is no action required on your part.</li>
-                <li style="margin-bottom: 8px;">Make sure emails from this address don't go to your spam folder.</li>
-                <li style="margin-bottom: 8px;">If you ever receive a message from RUThere, it means {sender_name} has not
-                    responded to several check-in attempts and wanted you to have that information.</li>
+                <li style="margin-bottom: 8px;">{t("email.invite_action_nothing", lang)}</li>
+                <li style="margin-bottom: 8px;">{t("email.invite_action_spam", lang)}</li>
+                <li style="margin-bottom: 8px;">{action_meaning}</li>
             </ul>
         </div>
 
-        <p style="color: #555; font-size: 15px;">
-            If you have questions about this, please reach out to {sender_name} directly.
-        </p>
-
-        <p style="color: #999; font-size: 13px; margin-top: 24px;">
-            This is an automated message from the RUThere heartbeat system.
-        </p>
+        <p style="color: #555; font-size: 15px;">{questions}</p>
+        <p style="color: #999; font-size: 13px; margin-top: 24px;">{footer}</p>
     </div>
     """
     return await send_email(to, subject, body_html)

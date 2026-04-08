@@ -252,18 +252,20 @@ async def test_heartbeat(
 
     settings = get_settings()
     response_url = f"{settings.base_url}/heartbeat/respond/{token}"
+    lang = user.language or "en"
 
     sent = False
     if user.ntfy_topic:
         sent = await send_ntfy_push(
             topic=user.ntfy_topic,
-            title="[TEST] RUThere? Heartbeat Check-in",
-            message="This is a test heartbeat. Tap to test the response flow.",
+            title=t("ntfy.test_title", lang),
+            message=t("ntfy.test_msg", lang),
             click_url=response_url,
+            lang=lang,
         )
 
     if not sent:
-        await send_heartbeat_email(user.email, response_url)
+        await send_heartbeat_email(user.email, response_url, lang=lang)
 
     return {"message": "Test heartbeat sent. It won't count as a miss if unresponded."}
 

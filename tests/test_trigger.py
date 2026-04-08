@@ -117,8 +117,7 @@ class TestE2ETrigger:
         tokens = result.scalars().all()
         assert len(tokens) == 1
         assert tokens[0].recipient_id == recipient.id
-        # Compare naive-to-naive since SQLite may store without tz
-        assert tokens[0].expires_at is not None
+        assert tokens[0].expires_at is None  # tokens never expire — passphrase is the security gate
 
     @patch("app.services.trigger.send_email", new_callable=AsyncMock, return_value=True)
     async def test_e2e_trigger_creates_log(self, mock_email, db, auth_user):
@@ -169,7 +168,6 @@ class TestRevealEndpoints:
             secret_id=secret.id,
             recipient_id=recipient.id,
             token=token,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=7),
         )
         db.add(reveal)
         await db.flush()
@@ -187,14 +185,6 @@ class TestRevealEndpoints:
         resp = await client.get("/reveal/nonexistent-token")
         assert resp.status_code == 404
 
-    async def test_reveal_page_expired_token(self, client, db, auth_user):
-        token, _, reveal = await self._create_reveal_token(db, auth_user)
-        reveal.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
-        await db.flush()
-
-        resp = await client.get(f"/reveal/{token}")
-        assert resp.status_code == 410
-
     async def test_reveal_api_valid_token(self, client, db, auth_user):
         token, secret, _ = await self._create_reveal_token(db, auth_user)
         resp = await client.get(f"/api/secrets/reveal/{token}")
@@ -204,10 +194,13 @@ class TestRevealEndpoints:
         assert data["encrypted_content"] is not None
         assert data["encryption_salt"] is not None
 
-    async def test_reveal_api_expired_token(self, client, db, auth_user):
+    async def test_reveal_token_has_no_expiry(self, client, db, auth_user):
+        """Reveal tokens should never expire — passphrase is the security gate."""
         token, _, reveal = await self._create_reveal_token(db, auth_user)
-        reveal.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
-        await db.flush()
+        assert reveal.expires_at is None
 
+        # Should always be accessible
+        resp = await client.get(f"/reveal/{token}")
+        assert resp.status_code == 200
         resp = await client.get(f"/api/secrets/reveal/{token}")
-        assert resp.status_code == 410
+        assert resp.status_code == 200

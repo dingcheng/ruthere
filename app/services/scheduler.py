@@ -20,6 +20,7 @@ from app.models.models import User, HeartbeatLog
 from app.services.notify import send_ntfy_push, send_heartbeat_email
 from app.services.trigger import execute_trigger
 from app.config import get_settings
+from app.i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -192,26 +193,27 @@ async def _prepare_heartbeat(user: User, db) -> tuple | None:
     user.next_heartbeat_at = compute_next_heartbeat(user)
     logger.info(f"Next heartbeat for {user.email}: {user.next_heartbeat_at.isoformat()}")
 
-    return (user.ntfy_topic, user.email, response_url)
+    return (user.ntfy_topic, user.email, response_url, user.language or "en")
 
 
 async def _send_notification(notification: tuple):
     """Send a single heartbeat notification with semaphore-limited concurrency."""
-    ntfy_topic, email, response_url = notification
+    ntfy_topic, email, response_url, lang = notification
     async with _notification_semaphore:
         sent = False
         if ntfy_topic:
             sent = await send_ntfy_push(
                 topic=ntfy_topic,
-                title="RUThere? Heartbeat Check-in",
-                message="Tap to confirm you're okay.",
+                title=t("ntfy.heartbeat_title", lang),
+                message=t("ntfy.heartbeat_msg", lang),
                 click_url=response_url,
+                lang=lang,
             )
             if sent:
                 logger.info(f"Heartbeat sent to {email} via ntfy")
 
         if not sent:
-            await send_heartbeat_email(email, response_url)
+            await send_heartbeat_email(email, response_url, lang=lang)
             logger.info(f"Heartbeat sent to {email} via email")
 
 
@@ -242,7 +244,7 @@ async def _check_outstanding_heartbeats(user: User, db):
             hb.escalated_at = datetime.now(timezone.utc)
             settings = get_settings()
             response_url = f"{settings.base_url}/heartbeat/respond/{hb.response_token}"
-            await send_heartbeat_email(user.email, response_url)
+            await send_heartbeat_email(user.email, response_url, lang=user.language or "en")
             logger.info(f"Escalated heartbeat to email for {user.email}")
             await db.flush()
             continue

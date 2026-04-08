@@ -247,11 +247,7 @@ async def get_reveal_data(token: str, db: AsyncSession = Depends(get_db)):
     )
     reveal = result.scalar_one_or_none()
     if not reveal:
-        raise HTTPException(status_code=404, detail="Invalid or expired reveal link")
-
-    now = datetime.now(timezone.utc)
-    if reveal.expires_at.replace(tzinfo=timezone.utc) < now:
-        raise HTTPException(status_code=410, detail="This reveal link has expired")
+        raise HTTPException(status_code=404, detail="Invalid reveal link")
 
     # Load the secret
     secret_result = await db.execute(
@@ -263,7 +259,7 @@ async def get_reveal_data(token: str, db: AsyncSession = Depends(get_db)):
 
     # Mark as accessed
     if not reveal.accessed_at:
-        reveal.accessed_at = now
+        reveal.accessed_at = datetime.now(timezone.utc)
 
     # Load sender info for display
     from app.models.models import User

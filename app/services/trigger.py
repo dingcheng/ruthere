@@ -7,17 +7,16 @@ Handles both encryption types:
 """
 import uuid
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import User, Recipient, Secret, TriggerLog, RevealToken
 from app.services.vault import decrypt, decode_from_storage
 from app.services.notify import send_secret_email, send_email
 from app.config import get_settings
+from app.i18n import t
 
 logger = logging.getLogger(__name__)
-
-REVEAL_TOKEN_EXPIRY_DAYS = 7
 
 
 async def execute_trigger(user: User, db: AsyncSession) -> int:
@@ -97,6 +96,7 @@ async def execute_trigger(user: User, db: AsyncSession) -> int:
 
 async def _trigger_server_secret(user: User, recipient: Recipient, secret: Secret) -> bool:
     """Decrypt a server-encrypted secret and email the plaintext."""
+    lang = user.language or "en"
     plaintext = decrypt(
         decode_from_storage(secret.encrypted_content),
         decode_from_storage(secret.encryption_nonce),
@@ -108,6 +108,7 @@ async def _trigger_server_secret(user: User, recipient: Recipient, secret: Secre
         sender_name=user.display_name or user.email,
         secret_title=secret.title,
         secret_content=plaintext,
+        lang=lang,
     )
 
 
@@ -116,50 +117,44 @@ async def _trigger_e2e_secret(
     db: AsyncSession, settings,
 ) -> bool:
     """Create a reveal token for an E2E secret and email the link to the recipient."""
+    lang = user.language or "en"
     token = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
 
     reveal = RevealToken(
         secret_id=secret.id,
         recipient_id=recipient.id,
         token=token,
-        expires_at=now + timedelta(days=REVEAL_TOKEN_EXPIRY_DAYS),
     )
     db.add(reveal)
     await db.flush()
 
-    reveal_url = f"{settings.base_url}/reveal/{token}"
+    reveal_url = f"{settings.base_url}/reveal/{token}?lang={lang}"
     sender_name = user.display_name or user.email
 
-    subject = f"RUThere - Message from {sender_name}"
+    subject = t("email.e2e_subject", lang).replace("{sender_name}", sender_name)
+    greeting = t("email.e2e_greeting", lang).replace("{recipient_name}", recipient.name)
+    body_text = t("email.e2e_body", lang).replace("{sender_name}", sender_name)
+    encrypted_body = t("email.e2e_encrypted_body", lang).replace("{sender_name}", sender_name)
+    footer = t("email.e2e_footer", lang)
+
     body_html = f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <h2 style="color: #333;">A Message For You</h2>
-        <p style="color: #555; font-size: 16px;">Dear {recipient.name},</p>
-        <p style="color: #555; font-size: 16px;">
-            {sender_name} set up a heartbeat check-in system and designated you as a recipient
-            of an important message. This message has been automatically delivered because
-            they did not respond to multiple check-in requests.
-        </p>
+        <h2 style="color: #333;">{t("email.e2e_heading", lang)}</h2>
+        <p style="color: #555; font-size: 16px;">{greeting}</p>
+        <p style="color: #555; font-size: 16px;">{body_text}</p>
 
         <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
-            <h3 style="color: #166534; margin-top: 0;">End-to-end encrypted</h3>
-            <p style="color: #555; font-size: 15px;">
-                This message is end-to-end encrypted. To read it, you'll need the
-                <strong>passphrase</strong> that {sender_name} shared with you.
-            </p>
+            <h3 style="color: #166534; margin-top: 0;">{t("email.e2e_encrypted_title", lang)}</h3>
+            <p style="color: #555; font-size: 15px;">{encrypted_body}</p>
         </div>
 
         <a href="{reveal_url}"
            style="display: inline-block; background: #22c55e; color: white; padding: 14px 28px;
                   text-decoration: none; border-radius: 8px; font-size: 18px; font-weight: 600; margin: 16px 0;">
-            View Message
+            {t("email.e2e_btn", lang)}
         </a>
 
-        <p style="color: #999; font-size: 13px; margin-top: 24px;">
-            This link expires in {REVEAL_TOKEN_EXPIRY_DAYS} days. The message is decrypted
-            entirely in your browser — the server cannot read it.
-        </p>
+        <p style="color: #999; font-size: 13px; margin-top: 24px;">{footer}</p>
     </div>
     """
 
