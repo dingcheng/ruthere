@@ -5,7 +5,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.models import User, Secret, Recipient, HeartbeatLog, TriggerLog
-from app.services.auth import decode_token
+from app.services.auth import decode_token, get_current_user
 from app.i18n import t, SUPPORTED_LANGUAGES
 
 router = APIRouter(tags=["web"])
@@ -44,6 +44,8 @@ async def index(request: Request, db: AsyncSession = Depends(get_db)):
     if not user:
         lang = _get_lang(request)
         return _login_page(lang=lang)
+    if not user.has_completed_onboarding:
+        return RedirectResponse(url="/onboarding", status_code=302)
     return RedirectResponse(url="/dashboard", status_code=302)
 
 
@@ -162,6 +164,37 @@ async def simulate_page(request: Request, db: AsyncSession = Depends(get_db)):
         return RedirectResponse(url="/login", status_code=302)
     lang = _get_lang(request, user)
     return _simulate_page(user, lang=lang)
+
+
+@router.get("/onboarding", response_class=HTMLResponse)
+async def onboarding(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await _get_web_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    lang = _get_lang(request, user)
+
+    secrets_result = await db.execute(
+        select(func.count()).select_from(Secret).where(Secret.user_id == user.id)
+    )
+    secrets_count = secrets_result.scalar()
+
+    recipients_result = await db.execute(
+        select(func.count()).select_from(Recipient).where(Recipient.user_id == user.id)
+    )
+    recipients_count = recipients_result.scalar()
+
+    return _onboarding_page(user, secrets_count, recipients_count, lang=lang)
+
+
+@router.post("/api/onboarding/complete")
+async def complete_onboarding(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark onboarding as complete for the current user."""
+    user.has_completed_onboarding = True
+    await db.flush()
+    return {"status": "ok"}
 
 
 @router.get("/reveal/{token}", response_class=HTMLResponse)
@@ -511,7 +544,7 @@ def _register_page(lang: str = "en") -> str:
                 }});
                 // Set cookie manually since register doesn't set it via response
                 document.cookie = `access_token=${{data.access_token}}; path=/; max-age=${{72*3600}}; samesite=lax`;
-                window.location.href = '/dashboard';
+                window.location.href = '/onboarding';
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
@@ -1596,3 +1629,506 @@ def _simulate_page(user: User, lang: str = "en") -> str:
         }}
     </script>"""
     return _base_html(_t("simulate.title", lang), content, user, lang=lang)
+
+
+def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str = "en") -> str:
+    """Render the 5-step onboarding wizard."""
+    secrets_done = "true" if secrets_count > 0 else "false"
+    recipients_done = "true" if recipients_count > 0 else "false"
+    secrets_word = _t("onboarding.s5_secret", lang) if secrets_count == 1 else _t("onboarding.s5_secrets", lang)
+    recipients_word = _t("onboarding.s5_recipient", lang) if recipients_count == 1 else _t("onboarding.s5_recipients", lang)
+
+    content = f"""
+    <div class="container">
+        <style>
+            .ob-steps {{ display: flex; justify-content: center; gap: 8px; align-items: center; margin-bottom: 32px; }}
+            .ob-step-dot {{ width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+                           font-size: 14px; font-weight: 700; border: 2px solid #334155; color: #64748b; background: transparent;
+                           transition: all 0.3s ease; flex-shrink: 0; }}
+            .ob-step-dot.active {{ border-color: #22c55e; color: #22c55e; background: rgba(34,197,94,0.1); }}
+            .ob-step-dot.completed {{ border-color: #22c55e; background: #22c55e; color: #0f172a; }}
+            .ob-step-line {{ width: 32px; height: 2px; background: #334155; transition: background 0.3s ease; }}
+            .ob-step-line.completed {{ background: #22c55e; }}
+            .ob-card {{ background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 28px 24px; display: none; }}
+            .ob-card.active {{ display: block; }}
+            .ob-card h2 {{ font-size: 22px; margin-bottom: 8px; color: #f1f5f9; }}
+            .ob-card p {{ color: #94a3b8; font-size: 15px; line-height: 1.6; margin-bottom: 12px; }}
+            .ob-nav {{ display: flex; justify-content: space-between; align-items: center; margin-top: 24px; gap: 12px; }}
+            .ob-nav .btn {{ min-width: 120px; }}
+            .ob-copy-box {{ display: flex; align-items: center; gap: 8px; background: #0f172a; border: 2px solid #22c55e;
+                           border-radius: 8px; padding: 14px 16px; margin: 12px 0; }}
+            .ob-copy-box code {{ font-size: 18px; font-weight: 600; color: #22c55e; flex: 1; word-break: break-all; }}
+            .ob-copy-btn {{ background: #22c55e; color: #0f172a; border: none; border-radius: 6px; padding: 8px 16px;
+                           font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }}
+            .ob-copy-btn:hover {{ background: #16a34a; }}
+            .ob-app-links {{ display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }}
+            .ob-app-links a {{ display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; background: #334155;
+                              border-radius: 8px; color: #e2e8f0; text-decoration: none; font-size: 14px; font-weight: 500; }}
+            .ob-app-links a:hover {{ background: #475569; }}
+            .ob-radio-group {{ display: flex; gap: 12px; margin-bottom: 16px; }}
+            .ob-radio-label {{ display: flex; align-items: flex-start; gap: 8px; cursor: pointer; padding: 14px 16px;
+                              background: #0f172a; border: 2px solid #334155; border-radius: 8px; flex: 1; }}
+            .ob-radio-label.selected {{ border-color: #22c55e; }}
+            .ob-radio-label input[type="radio"] {{ width: auto; margin: 3px 0 0 0; flex-shrink: 0; }}
+            .ob-radio-label div {{ font-size: 14px; color: #e2e8f0; font-weight: 600; }}
+            .ob-radio-label small {{ color: #94a3b8; font-size: 12px; margin-top: 2px; display: block; }}
+            .ob-checkmark {{ display: inline-flex; align-items: center; gap: 8px; background: #064e3b; color: #34d399;
+                            padding: 10px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; margin-bottom: 16px; }}
+            .ob-done-item {{ display: flex; align-items: center; gap: 10px; padding: 12px 0;
+                            border-bottom: 1px solid #334155; font-size: 15px; }}
+            .ob-done-item:last-child {{ border-bottom: none; }}
+            .ob-done-check {{ width: 24px; height: 24px; border-radius: 50%; background: #22c55e; color: #0f172a;
+                             display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; flex-shrink: 0; }}
+            @media (max-width: 640px) {{
+                .ob-steps {{ gap: 4px; }}
+                .ob-step-dot {{ width: 32px; height: 32px; font-size: 13px; }}
+                .ob-step-line {{ width: 20px; }}
+                .ob-card {{ padding: 20px 16px; }}
+                .ob-radio-group {{ flex-direction: column; }}
+                .ob-app-links {{ flex-direction: column; }}
+                .ob-app-links a {{ justify-content: center; }}
+                .ob-nav {{ flex-direction: column; }}
+                .ob-nav .btn {{ width: 100%; }}
+            }}
+        </style>
+
+        <div id="ob-alert" class="alert"></div>
+
+        <!-- Step indicators -->
+        <div class="ob-steps">
+            <div class="ob-step-dot active" id="dot-1">1</div>
+            <div class="ob-step-line" id="line-1"></div>
+            <div class="ob-step-dot" id="dot-2">2</div>
+            <div class="ob-step-line" id="line-2"></div>
+            <div class="ob-step-dot" id="dot-3">3</div>
+            <div class="ob-step-line" id="line-3"></div>
+            <div class="ob-step-dot" id="dot-4">4</div>
+            <div class="ob-step-line" id="line-4"></div>
+            <div class="ob-step-dot" id="dot-5">5</div>
+        </div>
+
+        <!-- Step 1: Welcome -->
+        <div class="ob-card active" id="step-1">
+            <h2>{_t("onboarding.s1_title", lang)}</h2>
+            <p>{_t("onboarding.s1_p1", lang)}</p>
+            <p>{_t("onboarding.s1_p2", lang)}</p>
+            <p>{_t("onboarding.s1_p3", lang)}</p>
+            <div class="ob-nav">
+                <div></div>
+                <button class="btn btn-primary" onclick="goToStep(2)">{_t("onboarding.s1_start", lang)}</button>
+            </div>
+        </div>
+
+        <!-- Step 2: ntfy Setup -->
+        <div class="ob-card" id="step-2">
+            <h2>{_t("onboarding.s2_title", lang)}</h2>
+            <p>{_t("onboarding.s2_why", lang)}</p>
+
+            <strong style="color:#e2e8f0;font-size:14px;display:block;margin-bottom:8px;">{_t("onboarding.s2_install", lang)}</strong>
+            <div class="ob-app-links">
+                <a href="https://apps.apple.com/us/app/ntfy/id1625396347" target="_blank" rel="noopener">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+                    {_t("onboarding.s2_ios", lang)}
+                </a>
+                <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank" rel="noopener">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3.18 23.04c-.35-.2-.57-.58-.57-1V1.96c0-.42.22-.8.57-1L13.54 12 3.18 23.04zm1.47.53L16.05 13.1l2.49 2.49-13.89 7.98zm0-23.14L17.54 8.4l-2.49 2.49L4.65.43zM19.07 11.35l2.77 1.59c.4.23.4.82 0 1.05l-2.77 1.59-2.78-2.12 2.78-2.11z"/></svg>
+                    {_t("onboarding.s2_android", lang)}
+                </a>
+            </div>
+
+            <strong style="color:#e2e8f0;font-size:14px;display:block;margin-top:20px;margin-bottom:4px;">{_t("onboarding.s2_subscribe_title", lang)}</strong>
+            <p style="margin-bottom:4px;">{_t("onboarding.s2_subscribe_desc", lang)}</p>
+            <div class="ob-copy-box">
+                <code id="ntfy-topic">{user.ntfy_topic}</code>
+                <button class="ob-copy-btn" onclick="copyTopic()" id="copy-btn">{_t("onboarding.s2_copy", lang)}</button>
+            </div>
+
+            <button class="btn btn-secondary" onclick="sendTestNotification()" id="test-btn" style="margin-top:8px;">
+                {_t("onboarding.s2_test", lang)}
+            </button>
+            <div id="test-result" style="display:none;margin-top:10px;padding:10px 14px;border-radius:8px;font-size:13px;"></div>
+
+            <div class="ob-nav">
+                <button class="btn btn-secondary" onclick="goToStep(1)">{_t("onboarding.back", lang)}</button>
+                <button class="btn btn-primary" onclick="goToStep(3)">{_t("onboarding.next", lang)}</button>
+            </div>
+        </div>
+
+        <!-- Step 3: Create Secret -->
+        <div class="ob-card" id="step-3">
+            <h2>{_t("onboarding.s3_title", lang)}</h2>
+            <p>{_t("onboarding.s3_desc", lang)}</p>
+
+            <div id="s3-existing" style="display:none;">
+                <div class="ob-checkmark">
+                    <span>&#10003;</span>
+                    <span id="s3-existing-text"></span>
+                </div>
+            </div>
+
+            <form onsubmit="saveOnboardingSecret(event)" id="s3-form">
+                <div class="form-row">
+                    <div class="ob-radio-group">
+                        <label class="ob-radio-label selected" id="ob-enc-server-label">
+                            <input type="radio" name="ob_enc_type" value="server" checked onchange="toggleObEncType()">
+                            <div>
+                                {_t("onboarding.s3_type_server", lang)}
+                                <small>{_t("onboarding.s3_type_server_desc", lang)}</small>
+                            </div>
+                        </label>
+                        <label class="ob-radio-label" id="ob-enc-e2e-label">
+                            <input type="radio" name="ob_enc_type" value="e2e" onchange="toggleObEncType()">
+                            <div>
+                                {_t("onboarding.s3_type_e2e", lang)}
+                                <small>{_t("onboarding.s3_type_e2e_desc", lang)}</small>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label for="ob-title">{_t("onboarding.s3_title_label", lang)}</label>
+                    <input type="text" id="ob-title" required placeholder="{_t("onboarding.s3_title_placeholder", lang)}">
+                </div>
+                <div class="form-row">
+                    <label for="ob-content">{_t("onboarding.s3_content_label", lang)}</label>
+                    <textarea id="ob-content" required placeholder="{_t("onboarding.s3_content_placeholder", lang)}"></textarea>
+                </div>
+                <div id="ob-passphrase-section" style="display:none;">
+                    <div class="form-row">
+                        <label for="ob-passphrase">{_t("onboarding.s3_passphrase_label", lang)}</label>
+                        <div class="pass-wrapper">
+                            <input type="password" id="ob-passphrase" placeholder="{_t("onboarding.s3_passphrase_placeholder", lang)}">
+                            <button type="button" class="pass-toggle" onclick="togglePassword('ob-passphrase', this)">{_t("common.show", lang)}</button>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <label for="ob-passphrase-confirm">{_t("onboarding.s3_passphrase_confirm_label", lang)}</label>
+                        <div class="pass-wrapper">
+                            <input type="password" id="ob-passphrase-confirm" placeholder="{_t("secrets.confirm_placeholder", lang)}">
+                            <button type="button" class="pass-toggle" onclick="togglePassword('ob-passphrase-confirm', this)">{_t("common.show", lang)}</button>
+                        </div>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary" id="s3-save-btn">{_t("onboarding.s3_save", lang)}</button>
+            </form>
+            <div id="s3-success" class="alert alert-success" style="display:none;margin-top:12px;"></div>
+
+            <div class="ob-nav">
+                <button class="btn btn-secondary" onclick="goToStep(2)">{_t("onboarding.back", lang)}</button>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="btn btn-secondary" onclick="goToStep(4)" id="s3-skip-btn" style="display:none;">{_t("onboarding.skip", lang)}</button>
+                    <button class="btn btn-primary" onclick="goToStep(4)" id="s3-next-btn">{_t("onboarding.next", lang)}</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 4: Add Recipient -->
+        <div class="ob-card" id="step-4">
+            <h2>{_t("onboarding.s4_title", lang)}</h2>
+            <p>{_t("onboarding.s4_desc", lang)}</p>
+
+            <div id="s4-existing" style="display:none;">
+                <div class="ob-checkmark">
+                    <span>&#10003;</span>
+                    <span id="s4-existing-text"></span>
+                </div>
+            </div>
+
+            <form onsubmit="saveOnboardingRecipient(event)" id="s4-form">
+                <div class="form-row">
+                    <label for="ob-rec-name">{_t("onboarding.s4_name_label", lang)}</label>
+                    <input type="text" id="ob-rec-name" required placeholder="{_t("onboarding.s4_name_placeholder", lang)}">
+                </div>
+                <div class="form-row">
+                    <label for="ob-rec-email">{_t("onboarding.s4_email_label", lang)}</label>
+                    <input type="email" id="ob-rec-email" required placeholder="{_t("onboarding.s4_email_placeholder", lang)}">
+                </div>
+                <div class="form-row">
+                    <label for="ob-rec-secret">{_t("onboarding.s4_secret_label", lang)}</label>
+                    <select id="ob-rec-secret" required>
+                        <option value="" disabled selected>—</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary" id="s4-save-btn">{_t("onboarding.s4_save", lang)}</button>
+            </form>
+            <div id="s4-success" class="alert alert-success" style="display:none;margin-top:12px;"></div>
+
+            <div class="ob-nav">
+                <button class="btn btn-secondary" onclick="goToStep(3)">{_t("onboarding.back", lang)}</button>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="btn btn-secondary" onclick="goToStep(5)" id="s4-skip-btn" style="display:none;">{_t("onboarding.skip", lang)}</button>
+                    <button class="btn btn-primary" onclick="goToStep(5)" id="s4-next-btn">{_t("onboarding.next", lang)}</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 5: All Done -->
+        <div class="ob-card" id="step-5">
+            <h2>{_t("onboarding.s5_title", lang)}</h2>
+            <p>{_t("onboarding.s5_summary", lang)}</p>
+
+            <div style="margin:20px 0;">
+                <div class="ob-done-item">
+                    <div class="ob-done-check">&#10003;</div>
+                    <span>{_t("onboarding.s5_ntfy", lang)}</span>
+                </div>
+                <div class="ob-done-item">
+                    <div class="ob-done-check" id="done-secret-check">&#10003;</div>
+                    <span id="done-secret-text">{secrets_count} {secrets_word}</span>
+                </div>
+                <div class="ob-done-item">
+                    <div class="ob-done-check" id="done-recipient-check">&#10003;</div>
+                    <span id="done-recipient-text">{recipients_count} {recipients_word}</span>
+                </div>
+            </div>
+
+            <div class="card" style="background:#0f172a;border:1px dashed #334155;margin-top:20px;">
+                <strong style="color:#f1f5f9;">{_t("onboarding.s5_sim_title", lang)}</strong>
+                <p style="font-size:13px;">{_t("onboarding.s5_sim_desc", lang)}</p>
+                <a href="/simulate" class="btn btn-secondary" style="margin-top:8px;">{_t("onboarding.s5_sim_btn", lang)}</a>
+            </div>
+
+            <div class="ob-nav" style="margin-top:24px;">
+                <button class="btn btn-secondary" onclick="goToStep(4)">{_t("onboarding.back", lang)}</button>
+                <button class="btn btn-primary" onclick="completeOnboarding()" id="ob-finish-btn">{_t("onboarding.s5_dashboard_btn", lang)}</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/e2e.js"></script>
+    <script>
+        let currentStep = 1;
+        const totalSteps = 5;
+        let obSecretsCount = {secrets_count};
+        let obRecipientsCount = {recipients_count};
+
+        function goToStep(step) {{
+            if (step < 1 || step > totalSteps) return;
+
+            // Hide current card
+            document.getElementById('step-' + currentStep).classList.remove('active');
+
+            // Show target card
+            document.getElementById('step-' + step).classList.add('active');
+
+            // Update step indicators
+            for (let i = 1; i <= totalSteps; i++) {{
+                const dot = document.getElementById('dot-' + i);
+                const line = i < totalSteps ? document.getElementById('line-' + i) : null;
+                dot.classList.remove('active', 'completed');
+                if (line) line.classList.remove('completed');
+
+                if (i < step) {{
+                    dot.classList.add('completed');
+                    dot.innerHTML = '&#10003;';
+                    if (line) line.classList.add('completed');
+                }} else if (i === step) {{
+                    dot.classList.add('active');
+                    dot.textContent = i;
+                }} else {{
+                    dot.textContent = i;
+                }}
+            }}
+
+            currentStep = step;
+
+            // Step-specific setup
+            if (step === 3) setupStep3();
+            if (step === 4) setupStep4();
+            if (step === 5) setupStep5();
+
+            // Scroll to top
+            window.scrollTo({{ top: 0, behavior: 'smooth' }});
+        }}
+
+        // ---- Step 2: ntfy ----
+        function copyTopic() {{
+            const topic = document.getElementById('ntfy-topic').textContent.trim();
+            navigator.clipboard.writeText(topic).then(() => {{
+                const btn = document.getElementById('copy-btn');
+                btn.textContent = '{_t("onboarding.s2_copied", lang)}';
+                setTimeout(() => btn.textContent = '{_t("onboarding.s2_copy", lang)}', 2000);
+            }});
+        }}
+
+        async function sendTestNotification() {{
+            const btn = document.getElementById('test-btn');
+            const result = document.getElementById('test-result');
+            btn.disabled = true;
+            btn.textContent = '{_t("onboarding.s2_test_sending", lang)}';
+            try {{
+                await apiCall('POST', '/api/heartbeat/test');
+                result.style.display = 'block';
+                result.style.background = '#064e3b';
+                result.style.color = '#34d399';
+                result.style.border = '1px solid #065f46';
+                result.textContent = '{_t("onboarding.s2_test_success", lang)}';
+            }} catch (err) {{
+                result.style.display = 'block';
+                result.style.background = '#450a0a';
+                result.style.color = '#f87171';
+                result.style.border = '1px solid #991b1b';
+                result.textContent = '{_t("onboarding.s2_test_fail", lang)}';
+            }}
+            btn.disabled = false;
+            btn.textContent = '{_t("onboarding.s2_test", lang)}';
+        }}
+
+        // ---- Step 3: Secret ----
+        function setupStep3() {{
+            if (obSecretsCount > 0) {{
+                document.getElementById('s3-existing').style.display = 'block';
+                const word = obSecretsCount === 1 ? '{_t("onboarding.s5_secret", lang)}' : '{_t("onboarding.s5_secrets", lang)}';
+                document.getElementById('s3-existing-text').textContent = obSecretsCount + ' ' + word;
+                document.getElementById('s3-skip-btn').style.display = 'inline-block';
+            }} else {{
+                document.getElementById('s3-existing').style.display = 'none';
+                document.getElementById('s3-skip-btn').style.display = 'none';
+            }}
+        }}
+
+        function toggleObEncType() {{
+            const isE2E = document.querySelector('input[name="ob_enc_type"]:checked').value === 'e2e';
+            document.getElementById('ob-passphrase-section').style.display = isE2E ? 'block' : 'none';
+            document.getElementById('ob-passphrase').required = isE2E;
+            document.getElementById('ob-passphrase-confirm').required = isE2E;
+            document.getElementById('ob-enc-server-label').classList.toggle('selected', !isE2E);
+            document.getElementById('ob-enc-e2e-label').classList.toggle('selected', isE2E);
+        }}
+
+        async function saveOnboardingSecret(e) {{
+            e.preventDefault();
+            const encType = document.querySelector('input[name="ob_enc_type"]:checked').value;
+            const title = document.getElementById('ob-title').value;
+            const content = document.getElementById('ob-content').value;
+            const btn = document.getElementById('s3-save-btn');
+
+            try {{
+                if (encType === 'e2e') {{
+                    const passphrase = document.getElementById('ob-passphrase').value;
+                    const confirm = document.getElementById('ob-passphrase-confirm').value;
+                    if (passphrase !== confirm) {{
+                        showAlert('ob-alert', '{_t("secrets.mismatch", lang)}', true);
+                        return;
+                    }}
+                    if (passphrase.length < 6) {{
+                        showAlert('ob-alert', '{_t("secrets.too_short", lang)}', true);
+                        return;
+                    }}
+                    btn.textContent = '{_t("onboarding.s3_saving", lang)}';
+                    btn.disabled = true;
+                    const encrypted = await E2E.encrypt(content, passphrase);
+                    await apiCall('POST', '/api/secrets', {{
+                        title: title,
+                        encryption_type: 'e2e',
+                        encrypted_content: encrypted.encrypted_content,
+                        encryption_nonce: encrypted.encryption_nonce,
+                        encryption_tag: encrypted.encryption_tag,
+                        encryption_salt: encrypted.encryption_salt,
+                    }});
+                }} else {{
+                    btn.textContent = '{_t("onboarding.s3_saving", lang)}';
+                    btn.disabled = true;
+                    await apiCall('POST', '/api/secrets', {{
+                        title: title,
+                        content: content,
+                    }});
+                }}
+                obSecretsCount++;
+                const successEl = document.getElementById('s3-success');
+                successEl.textContent = '{_t("onboarding.s3_saved", lang)}';
+                successEl.style.display = 'block';
+                setTimeout(() => successEl.style.display = 'none', 5000);
+                // Reset form
+                document.getElementById('s3-form').reset();
+                toggleObEncType();
+                setupStep3();
+            }} catch (err) {{
+                showAlert('ob-alert', err.message, true);
+            }}
+            btn.textContent = '{_t("onboarding.s3_save", lang)}';
+            btn.disabled = false;
+        }}
+
+        // ---- Step 4: Recipient ----
+        async function setupStep4() {{
+            if (obRecipientsCount > 0) {{
+                document.getElementById('s4-existing').style.display = 'block';
+                const word = obRecipientsCount === 1 ? '{_t("onboarding.s5_recipient", lang)}' : '{_t("onboarding.s5_recipients", lang)}';
+                document.getElementById('s4-existing-text').textContent = obRecipientsCount + ' ' + word;
+                document.getElementById('s4-skip-btn').style.display = 'inline-block';
+            }} else {{
+                document.getElementById('s4-existing').style.display = 'none';
+                document.getElementById('s4-skip-btn').style.display = 'none';
+            }}
+            // Populate secrets dropdown
+            try {{
+                const secrets = await apiCall('GET', '/api/secrets');
+                const sel = document.getElementById('ob-rec-secret');
+                // Clear existing options except the placeholder
+                sel.innerHTML = '<option value="" disabled selected>—</option>';
+                if (secrets && secrets.length) {{
+                    for (const s of secrets) {{
+                        const opt = document.createElement('option');
+                        opt.value = s.id;
+                        opt.textContent = s.title;
+                        sel.appendChild(opt);
+                    }}
+                }}
+            }} catch (err) {{
+                // Silently fail — user may not have secrets yet
+            }}
+        }}
+
+        async function saveOnboardingRecipient(e) {{
+            e.preventDefault();
+            const btn = document.getElementById('s4-save-btn');
+            btn.textContent = '{_t("onboarding.s4_saving", lang)}';
+            btn.disabled = true;
+            try {{
+                await apiCall('POST', '/api/recipients', {{
+                    name: document.getElementById('ob-rec-name').value,
+                    email: document.getElementById('ob-rec-email').value,
+                    secret_id: document.getElementById('ob-rec-secret').value,
+                }});
+                obRecipientsCount++;
+                const successEl = document.getElementById('s4-success');
+                successEl.textContent = '{_t("onboarding.s4_saved", lang)}';
+                successEl.style.display = 'block';
+                setTimeout(() => successEl.style.display = 'none', 5000);
+                document.getElementById('s4-form').reset();
+                setupStep4();
+            }} catch (err) {{
+                showAlert('ob-alert', err.message, true);
+            }}
+            btn.textContent = '{_t("onboarding.s4_save", lang)}';
+            btn.disabled = false;
+        }}
+
+        // ---- Step 5: Done ----
+        function setupStep5() {{
+            const secretWord = obSecretsCount === 1 ? '{_t("onboarding.s5_secret", lang)}' : '{_t("onboarding.s5_secrets", lang)}';
+            const recipientWord = obRecipientsCount === 1 ? '{_t("onboarding.s5_recipient", lang)}' : '{_t("onboarding.s5_recipients", lang)}';
+            document.getElementById('done-secret-text').textContent = obSecretsCount + ' ' + secretWord;
+            document.getElementById('done-recipient-text').textContent = obRecipientsCount + ' ' + recipientWord;
+
+            // Grey out checks if zero
+            document.getElementById('done-secret-check').style.background = obSecretsCount > 0 ? '#22c55e' : '#475569';
+            document.getElementById('done-recipient-check').style.background = obRecipientsCount > 0 ? '#22c55e' : '#475569';
+        }}
+
+        async function completeOnboarding() {{
+            const btn = document.getElementById('ob-finish-btn');
+            btn.disabled = true;
+            try {{
+                await apiCall('POST', '/api/onboarding/complete');
+            }} catch (err) {{
+                // Non-blocking — still redirect
+            }}
+            window.location.href = '/dashboard';
+        }}
+
+        // Initialize
+        setupStep3();
+    </script>"""
+    return _base_html(_t("onboarding.title", lang), content, user, lang=lang)

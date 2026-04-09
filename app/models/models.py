@@ -46,6 +46,9 @@ class User(Base):
     # Next scheduled heartbeat (persisted so restarts don't reset timing)
     next_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
+    # Onboarding
+    has_completed_onboarding: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     # Relationships
