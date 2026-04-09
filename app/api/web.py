@@ -1792,6 +1792,11 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
                         </label>
                     </div>
                 </div>
+                <div id="ob-e2e-info" style="display:none;background:#064e3b;border:1px solid #065f46;border-radius:8px;padding:14px;margin-bottom:16px;font-size:13px;color:#34d399;line-height:1.5;">
+                    <strong>{_t("secrets.e2e_info_bold", lang)}</strong> {_t("secrets.e2e_info", lang)}
+                    <br><br>
+                    <strong>{_t("secrets.e2e_verify_bold", lang)}</strong> {_t("secrets.e2e_verify", lang)}
+                </div>
                 <div class="form-row">
                     <label for="ob-title">{_t("onboarding.s3_title_label", lang)}</label>
                     <input type="text" id="ob-title" required placeholder="{_t("onboarding.s3_title_placeholder", lang)}">
@@ -1814,6 +1819,9 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
                             <input type="password" id="ob-passphrase-confirm" placeholder="{_t("secrets.confirm_placeholder", lang)}">
                             <button type="button" class="pass-toggle" onclick="togglePassword('ob-passphrase-confirm', this)">{_t("common.show", lang)}</button>
                         </div>
+                    </div>
+                    <div style="background:#450a0a;border:1px solid #991b1b;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;color:#f87171;line-height:1.5;">
+                        <strong>{_t("secrets.passphrase_warning_bold", lang)}</strong> {_t("secrets.passphrase_warning", lang)}
                     </div>
                 </div>
                 <button type="submit" class="btn btn-primary" id="s3-save-btn">{_t("onboarding.s3_save", lang)}</button>
@@ -1939,6 +1947,9 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
 
             currentStep = step;
 
+            // Update URL hash without triggering hashchange
+            history.replaceState(null, '', '#step' + step);
+
             // Step-specific setup
             if (step === 3) setupStep3();
             if (step === 4) setupStep4();
@@ -1997,6 +2008,7 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
         function toggleObEncType() {{
             const isE2E = document.querySelector('input[name="ob_enc_type"]:checked').value === 'e2e';
             document.getElementById('ob-passphrase-section').style.display = isE2E ? 'block' : 'none';
+            document.getElementById('ob-e2e-info').style.display = isE2E ? 'block' : 'none';
             document.getElementById('ob-passphrase').required = isE2E;
             document.getElementById('ob-passphrase-confirm').required = isE2E;
             document.getElementById('ob-enc-server-label').classList.toggle('selected', !isE2E);
@@ -2137,5 +2149,17 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
 
         // Initialize
         setupStep3();
+
+        // URL hash-based step navigation
+        function readHashStep() {{
+            const hash = window.location.hash;
+            const match = hash.match(/^#step(\\d)$/);
+            if (match) {{
+                const step = parseInt(match[1]);
+                if (step >= 1 && step <= totalSteps) goToStep(step);
+            }}
+        }}
+        readHashStep();
+        window.addEventListener('hashchange', readHashStep);
     </script>"""
     return _base_html(_t("onboarding.title", lang), content, user, lang=lang)
