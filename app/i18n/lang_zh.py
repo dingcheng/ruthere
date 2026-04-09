@@ -11,6 +11,7 @@ TRANSLATIONS = {
         "secrets": "保险箱",
         "recipients": "托付人",
         "simulate": "模拟测试",
+        "onboarding": "新手引导",
         "settings": "设置",
         "logout": "退出登录",
         "menu": "菜单",

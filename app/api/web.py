@@ -265,6 +265,7 @@ def _base_html(title: str, content: str, user: User | None = None, lang: str = "
                 <a href="/manage/secrets">{_t("nav.secrets", lang)}</a>
                 <a href="/manage/recipients">{_t("nav.recipients", lang)}</a>
                 <a href="/simulate">{_t("nav.simulate", lang)}</a>
+                <a href="/onboarding">{_t("nav.onboarding", lang)}</a>
                 <a href="/settings">{_t("nav.settings", lang)}</a>
                 <a href="#" onclick="logout()">{_t("nav.logout", lang)}</a>
             </div>

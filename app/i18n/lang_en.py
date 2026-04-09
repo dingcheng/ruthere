@@ -11,6 +11,7 @@ TRANSLATIONS = {
         "secrets": "Secrets",
         "recipients": "Recipients",
         "simulate": "Simulate",
+        "onboarding": "Guide",
         "settings": "Settings",
         "logout": "Logout",
         "menu": "Menu",
