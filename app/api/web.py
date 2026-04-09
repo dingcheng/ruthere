@@ -50,8 +50,17 @@ async def index(request: Request, db: AsyncSession = Depends(get_db)):
     if not user:
         lang = _get_lang(request)
         return _login_page(lang=lang)
-    if not user.has_completed_onboarding:
+
+    # Auto-redirect to onboarding if user hasn't fully set up (needs both secrets AND recipients)
+    secrets_result = await db.execute(
+        select(func.count()).select_from(Secret).where(Secret.user_id == user.id)
+    )
+    recipients_result = await db.execute(
+        select(func.count()).select_from(Recipient).where(Recipient.user_id == user.id)
+    )
+    if secrets_result.scalar() == 0 or recipients_result.scalar() == 0:
         return RedirectResponse(url="/onboarding", status_code=302)
+
     return RedirectResponse(url="/dashboard", status_code=302)
 
 
@@ -190,17 +199,6 @@ async def onboarding(request: Request, db: AsyncSession = Depends(get_db)):
     recipients_count = recipients_result.scalar()
 
     return _onboarding_page(user, secrets_count, recipients_count, lang=lang)
-
-
-@router.post("/api/onboarding/complete")
-async def complete_onboarding(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Mark onboarding as complete for the current user."""
-    user.has_completed_onboarding = True
-    await db.flush()
-    return {"status": "ok"}
 
 
 @router.get("/reveal/{token}", response_class=HTMLResponse)
@@ -506,7 +504,7 @@ def _login_page(lang: str = "en") -> str:
                     email: document.getElementById('email').value,
                     password: document.getElementById('password').value,
                 }});
-                window.location.href = '/dashboard';
+                window.location.href = '/';
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
@@ -769,7 +767,7 @@ def _secrets_page(user: User, secrets: list, lang: str = "en") -> str:
             <td>{s.created_at.strftime("%Y-%m-%d")}</td>
             <td>
                 <button class="btn btn-secondary btn-sm" onclick="{view_onclick}">{_t("secrets.view", lang)}</button>
-                <button class="btn btn-danger btn-sm" onclick="deleteSecret('{s.id}')">{_t("secrets.delete", lang)}</button>
+                <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteSecret('{s.id}')">{_t("secrets.delete", lang)}</button>
             </td>
         </tr>"""
 
@@ -1004,15 +1002,17 @@ def _secrets_page(user: User, secrets: list, lang: str = "en") -> str:
             currentE2EData = null;
         }}
 
-        async function deleteSecret(id) {{
+        let _deleting = false;
+        function deleteSecret(id) {{
+            if (_deleting) return;
             if (!confirm('{_t_js("secrets.confirm_delete", lang)}')) return;
-            try {{
-                await apiCall('DELETE', `/api/secrets/${{id}}`);
+            _deleting = true;
+            apiCall('DELETE', `/api/secrets/${{id}}`).then(() => {{
                 document.getElementById(`secret-${{id}}`).remove();
                 showAlert('alert', '{_t_js("secrets.deleted", lang)}', false);
-            }} catch (err) {{
+            }}).catch(err => {{
                 showAlert('alert', err.message, true);
-            }}
+            }}).finally(() => {{ _deleting = false; }});
         }}
     </script>"""
     return _base_html(_t("secrets.title", lang), content, user, lang=lang)
@@ -1034,7 +1034,7 @@ def _recipients_page(user: User, recipients: list, secrets: list, lang: str = "e
             <td>{r.email}</td>
             <td>{secret_title}</td>
             <td>
-                <button class="btn btn-danger btn-sm" onclick="deleteRecipient('{r.id}')">{_t("recipients.delete", lang)}</button>
+                <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteRecipient('{r.id}')">{_t("recipients.delete", lang)}</button>
             </td>
         </tr>"""
 
@@ -1090,15 +1090,17 @@ def _recipients_page(user: User, recipients: list, secrets: list, lang: str = "e
             }}
         }}
 
-        async function deleteRecipient(id) {{
+        let _deletingRec = false;
+        function deleteRecipient(id) {{
+            if (_deletingRec) return;
             if (!confirm('{_t_js("recipients.confirm_remove", lang)}')) return;
-            try {{
-                await apiCall('DELETE', `/api/recipients/${{id}}`);
+            _deletingRec = true;
+            apiCall('DELETE', `/api/recipients/${{id}}`).then(() => {{
                 document.getElementById(`recipient-${{id}}`).remove();
                 showAlert('alert', '{_t_js("recipients.removed", lang)}', false);
-            }} catch (err) {{
+            }}).catch(err => {{
                 showAlert('alert', err.message, true);
-            }}
+            }}).finally(() => {{ _deletingRec = false; }});
         }}
     </script>"""
     return _base_html(_t("recipients.title", lang), content, user, lang=lang)
@@ -2136,14 +2138,7 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
             document.getElementById('done-recipient-check').style.background = obRecipientsCount > 0 ? '#22c55e' : '#475569';
         }}
 
-        async function completeOnboarding() {{
-            const btn = document.getElementById('ob-finish-btn');
-            btn.disabled = true;
-            try {{
-                await apiCall('POST', '/api/onboarding/complete');
-            }} catch (err) {{
-                // Non-blocking — still redirect
-            }}
+        function completeOnboarding() {{
             window.location.href = '/dashboard';
         }}
 
