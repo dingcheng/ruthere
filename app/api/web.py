@@ -12,8 +12,14 @@ router = APIRouter(tags=["web"])
 
 
 def _t(key: str, lang: str) -> str:
-    """Shortcut for template translations. Escapes curly braces for f-string safety."""
+    """Translation for HTML templates. Safe for HTML content and attributes."""
     return t(key, lang)
+
+
+def _t_js(key: str, lang: str) -> str:
+    """Translation safe for embedding in JavaScript single-quoted strings.
+    Escapes single quotes and backslashes."""
+    return t(key, lang).replace("\\", "\\\\").replace("'", "\\'")
 
 
 async def _get_web_user(request: Request, db: AsyncSession) -> User | None:
@@ -743,7 +749,7 @@ def _dashboard_page(user: User, secrets_count: int, recipients_count: int, recen
         async function testHeartbeat() {{
             try {{
                 await apiCall('POST', '/api/heartbeat/test');
-                showAlert('hb-alert', '{_t("dashboard.test_sent", lang)}', false);
+                showAlert('hb-alert', '{_t_js("dashboard.test_sent", lang)}', false);
             }} catch (err) {{
                 showAlert('hb-alert', err.message, true);
             }}
@@ -899,15 +905,15 @@ def _secrets_page(user: User, secrets: list, lang: str = "en") -> str:
                     const passphrase = document.getElementById('passphrase').value;
                     const confirm = document.getElementById('passphrase_confirm').value;
                     if (passphrase !== confirm) {{
-                        showAlert('alert', '{_t("secrets.mismatch", lang)}', true);
+                        showAlert('alert', '{_t_js("secrets.mismatch", lang)}', true);
                         return;
                     }}
                     if (passphrase.length < 6) {{
-                        showAlert('alert', '{_t("secrets.too_short", lang)}', true);
+                        showAlert('alert', '{_t_js("secrets.too_short", lang)}', true);
                         return;
                     }}
 
-                    document.getElementById('save-btn').textContent = '{_t("secrets.encrypting", lang)}';
+                    document.getElementById('save-btn').textContent = '{_t_js("secrets.encrypting", lang)}';
                     document.getElementById('save-btn').disabled = true;
 
                     // Encrypt client-side
@@ -921,18 +927,18 @@ def _secrets_page(user: User, secrets: list, lang: str = "en") -> str:
                         encryption_tag: encrypted.encryption_tag,
                         encryption_salt: encrypted.encryption_salt,
                     }});
-                    showAlert('alert', '{_t("secrets.e2e_saved", lang)}', false);
+                    showAlert('alert', '{_t_js("secrets.e2e_saved", lang)}', false);
                 }} else {{
                     await apiCall('POST', '/api/secrets', {{
                         title: title,
                         content: content,
                     }});
-                    showAlert('alert', '{_t("secrets.server_saved", lang)}', false);
+                    showAlert('alert', '{_t_js("secrets.server_saved", lang)}', false);
                 }}
                 setTimeout(() => location.reload(), 1000);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
-                document.getElementById('save-btn').textContent = '{_t("secrets.encrypt_save", lang)}';
+                document.getElementById('save-btn').textContent = '{_t_js("secrets.encrypt_save", lang)}';
                 document.getElementById('save-btn').disabled = false;
             }}
         }}
@@ -969,7 +975,7 @@ def _secrets_page(user: User, secrets: list, lang: str = "en") -> str:
             if (!passphrase) return;
             const btn = document.getElementById('e2e-decrypt-btn');
             btn.disabled = true;
-            btn.textContent = '{_t("secrets.decrypting", lang)}';
+            btn.textContent = '{_t_js("secrets.decrypting", lang)}';
             try {{
                 const plaintext = await E2E.decrypt(
                     currentE2EData.encrypted_content,
@@ -982,11 +988,11 @@ def _secrets_page(user: User, secrets: list, lang: str = "en") -> str:
                 document.getElementById('e2e-modal-content').style.display = 'block';
                 document.getElementById('e2e-modal-content').textContent = plaintext;
             }} catch (err) {{
-                document.getElementById('e2e-view-error').textContent = '{_t("secrets.wrong_passphrase", lang)}';
+                document.getElementById('e2e-view-error').textContent = '{_t_js("secrets.wrong_passphrase", lang)}';
                 document.getElementById('e2e-view-error').style.display = 'block';
             }}
             btn.disabled = false;
-            btn.textContent = '{_t("secrets.decrypt", lang)}';
+            btn.textContent = '{_t_js("secrets.decrypt", lang)}';
         }}
 
         function closeModal() {{
@@ -999,11 +1005,11 @@ def _secrets_page(user: User, secrets: list, lang: str = "en") -> str:
         }}
 
         async function deleteSecret(id) {{
-            if (!confirm('{_t("secrets.confirm_delete", lang)}')) return;
+            if (!confirm('{_t_js("secrets.confirm_delete", lang)}')) return;
             try {{
                 await apiCall('DELETE', `/api/secrets/${{id}}`);
                 document.getElementById(`secret-${{id}}`).remove();
-                showAlert('alert', '{_t("secrets.deleted", lang)}', false);
+                showAlert('alert', '{_t_js("secrets.deleted", lang)}', false);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
@@ -1077,7 +1083,7 @@ def _recipients_page(user: User, recipients: list, secrets: list, lang: str = "e
                     email: document.getElementById('rec-email').value,
                     secret_id: document.getElementById('secret_id').value,
                 }});
-                showAlert('alert', '{_t("recipients.added", lang)}', false);
+                showAlert('alert', '{_t_js("recipients.added", lang)}', false);
                 setTimeout(() => location.reload(), 1000);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
@@ -1085,11 +1091,11 @@ def _recipients_page(user: User, recipients: list, secrets: list, lang: str = "e
         }}
 
         async function deleteRecipient(id) {{
-            if (!confirm('{_t("recipients.confirm_remove", lang)}')) return;
+            if (!confirm('{_t_js("recipients.confirm_remove", lang)}')) return;
             try {{
                 await apiCall('DELETE', `/api/recipients/${{id}}`);
                 document.getElementById(`recipient-${{id}}`).remove();
-                showAlert('alert', '{_t("recipients.removed", lang)}', false);
+                showAlert('alert', '{_t_js("recipients.removed", lang)}', false);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
@@ -1259,7 +1265,7 @@ def _settings_page(user: User, lang: str = "en") -> str:
                     display_name: document.getElementById('display_name').value || null,
                     language: document.getElementById('language').value,
                 }});
-                showAlert('alert', '{_t("settings.profile_updated", lang)}', false);
+                showAlert('alert', '{_t_js("settings.profile_updated", lang)}', false);
                 // Reload to reflect language change
                 const newLang = document.getElementById('language').value;
                 setTimeout(() => window.location.href = '/settings?lang=' + newLang, 1000);
@@ -1280,19 +1286,19 @@ def _settings_page(user: User, lang: str = "en") -> str:
                     active_hours_start: parseInt(document.getElementById('active_start').value),
                     active_hours_end: parseInt(document.getElementById('active_end').value),
                 }});
-                showAlert('alert', '{_t("settings.settings_saved", lang)}', false);
+                showAlert('alert', '{_t_js("settings.settings_saved", lang)}', false);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
         }}
 
         async function resetMisses() {{
-            if (!confirm('{_t("settings.confirm_reset", lang)}')) return;
+            if (!confirm('{_t_js("settings.confirm_reset", lang)}')) return;
             try {{
                 await apiCall('PUT', '/api/heartbeat/settings', {{
                     is_active: true,
                 }});
-                showAlert('alert', '{_t("settings.reset_done", lang)}', false);
+                showAlert('alert', '{_t_js("settings.reset_done", lang)}', false);
                 setTimeout(() => location.reload(), 1000);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
@@ -1407,10 +1413,10 @@ def _reveal_page(sender_name: str, secret_title: str,
             const btn = document.getElementById('reveal-pass-toggle');
             if (input.type === 'password') {{
                 input.type = 'text';
-                btn.textContent = '{_t("common.hide", lang)}';
+                btn.textContent = '{_t_js("common.hide", lang)}';
             }} else {{
                 input.type = 'password';
-                btn.textContent = '{_t("common.show", lang)}';
+                btn.textContent = '{_t_js("common.show", lang)}';
             }}
         }}
 
@@ -1439,7 +1445,7 @@ def _reveal_page(sender_name: str, secret_title: str,
                 document.getElementById('secret-content').style.display = 'block';
                 document.getElementById('secret-content').textContent = plaintext;
             }} catch (e) {{
-                error.textContent = '{_t("reveal.wrong_passphrase", lang)}';
+                error.textContent = '{_t_js("reveal.wrong_passphrase", lang)}';
                 error.style.display = 'block';
                 btn.disabled = false;
                 spinner.className = 'spinner';
@@ -1566,7 +1572,7 @@ def _simulate_page(user: User, lang: str = "en") -> str:
             const origText = btnEl.textContent;
 
             btnEl.disabled = true;
-            btnEl.textContent = '{_t("simulate.processing", lang)}';
+            btnEl.textContent = '{_t_js("simulate.processing", lang)}';
 
             try {{
                 const data = await apiCall('POST', '/api/simulate/' + endpoint);
@@ -1587,7 +1593,7 @@ def _simulate_page(user: User, lang: str = "en") -> str:
             const resEl = document.getElementById('step4-result');
             const origText = btn.textContent;
             btn.disabled = true;
-            btn.textContent = '{_t("simulate.triggering", lang)}';
+            btn.textContent = '{_t_js("simulate.triggering", lang)}';
 
             try {{
                 const testEmail = document.getElementById('test_email').value || null;
@@ -1618,12 +1624,12 @@ def _simulate_page(user: User, lang: str = "en") -> str:
             try {{
                 const data = await apiCall('POST', '/api/simulate/reset');
                 document.getElementById('miss-count').textContent = '0';
-                document.getElementById('user-status').textContent = '{_t("dashboard.active", lang)}';
+                document.getElementById('user-status').textContent = '{_t_js("dashboard.active", lang)}';
                 for (let i = 1; i <= 4; i++) {{
                     const el = document.getElementById('step' + i + '-result');
                     if (el) el.style.display = 'none';
                 }}
-                showAlert('alert', '{_t("simulate.reset_done", lang)}', false);
+                showAlert('alert', '{_t_js("simulate.reset_done", lang)}', false);
             }} catch (err) {{
                 showAlert('alert', err.message, true);
             }}
@@ -1947,8 +1953,8 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
             const topic = document.getElementById('ntfy-topic').textContent.trim();
             navigator.clipboard.writeText(topic).then(() => {{
                 const btn = document.getElementById('copy-btn');
-                btn.textContent = '{_t("onboarding.s2_copied", lang)}';
-                setTimeout(() => btn.textContent = '{_t("onboarding.s2_copy", lang)}', 2000);
+                btn.textContent = '{_t_js("onboarding.s2_copied", lang)}';
+                setTimeout(() => btn.textContent = '{_t_js("onboarding.s2_copy", lang)}', 2000);
             }});
         }}
 
@@ -1956,30 +1962,30 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
             const btn = document.getElementById('test-btn');
             const result = document.getElementById('test-result');
             btn.disabled = true;
-            btn.textContent = '{_t("onboarding.s2_test_sending", lang)}';
+            btn.textContent = '{_t_js("onboarding.s2_test_sending", lang)}';
             try {{
                 await apiCall('POST', '/api/heartbeat/test');
                 result.style.display = 'block';
                 result.style.background = '#064e3b';
                 result.style.color = '#34d399';
                 result.style.border = '1px solid #065f46';
-                result.textContent = '{_t("onboarding.s2_test_success", lang)}';
+                result.textContent = '{_t_js("onboarding.s2_test_success", lang)}';
             }} catch (err) {{
                 result.style.display = 'block';
                 result.style.background = '#450a0a';
                 result.style.color = '#f87171';
                 result.style.border = '1px solid #991b1b';
-                result.textContent = '{_t("onboarding.s2_test_fail", lang)}';
+                result.textContent = '{_t_js("onboarding.s2_test_fail", lang)}';
             }}
             btn.disabled = false;
-            btn.textContent = '{_t("onboarding.s2_test", lang)}';
+            btn.textContent = '{_t_js("onboarding.s2_test", lang)}';
         }}
 
         // ---- Step 3: Secret ----
         function setupStep3() {{
             if (obSecretsCount > 0) {{
                 document.getElementById('s3-existing').style.display = 'block';
-                const word = obSecretsCount === 1 ? '{_t("onboarding.s5_secret", lang)}' : '{_t("onboarding.s5_secrets", lang)}';
+                const word = obSecretsCount === 1 ? '{_t_js("onboarding.s5_secret", lang)}' : '{_t_js("onboarding.s5_secrets", lang)}';
                 document.getElementById('s3-existing-text').textContent = obSecretsCount + ' ' + word;
                 document.getElementById('s3-skip-btn').style.display = 'inline-block';
             }} else {{
@@ -2009,14 +2015,14 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
                     const passphrase = document.getElementById('ob-passphrase').value;
                     const confirm = document.getElementById('ob-passphrase-confirm').value;
                     if (passphrase !== confirm) {{
-                        showAlert('ob-alert', '{_t("secrets.mismatch", lang)}', true);
+                        showAlert('ob-alert', '{_t_js("secrets.mismatch", lang)}', true);
                         return;
                     }}
                     if (passphrase.length < 6) {{
-                        showAlert('ob-alert', '{_t("secrets.too_short", lang)}', true);
+                        showAlert('ob-alert', '{_t_js("secrets.too_short", lang)}', true);
                         return;
                     }}
-                    btn.textContent = '{_t("onboarding.s3_saving", lang)}';
+                    btn.textContent = '{_t_js("onboarding.s3_saving", lang)}';
                     btn.disabled = true;
                     const encrypted = await E2E.encrypt(content, passphrase);
                     await apiCall('POST', '/api/secrets', {{
@@ -2028,7 +2034,7 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
                         encryption_salt: encrypted.encryption_salt,
                     }});
                 }} else {{
-                    btn.textContent = '{_t("onboarding.s3_saving", lang)}';
+                    btn.textContent = '{_t_js("onboarding.s3_saving", lang)}';
                     btn.disabled = true;
                     await apiCall('POST', '/api/secrets', {{
                         title: title,
@@ -2037,7 +2043,7 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
                 }}
                 obSecretsCount++;
                 const successEl = document.getElementById('s3-success');
-                successEl.textContent = '{_t("onboarding.s3_saved", lang)}';
+                successEl.textContent = '{_t_js("onboarding.s3_saved", lang)}';
                 successEl.style.display = 'block';
                 setTimeout(() => successEl.style.display = 'none', 5000);
                 // Reset form
@@ -2047,7 +2053,7 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
             }} catch (err) {{
                 showAlert('ob-alert', err.message, true);
             }}
-            btn.textContent = '{_t("onboarding.s3_save", lang)}';
+            btn.textContent = '{_t_js("onboarding.s3_save", lang)}';
             btn.disabled = false;
         }}
 
@@ -2055,7 +2061,7 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
         async function setupStep4() {{
             if (obRecipientsCount > 0) {{
                 document.getElementById('s4-existing').style.display = 'block';
-                const word = obRecipientsCount === 1 ? '{_t("onboarding.s5_recipient", lang)}' : '{_t("onboarding.s5_recipients", lang)}';
+                const word = obRecipientsCount === 1 ? '{_t_js("onboarding.s5_recipient", lang)}' : '{_t_js("onboarding.s5_recipients", lang)}';
                 document.getElementById('s4-existing-text').textContent = obRecipientsCount + ' ' + word;
                 document.getElementById('s4-skip-btn').style.display = 'inline-block';
             }} else {{
@@ -2084,7 +2090,7 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
         async function saveOnboardingRecipient(e) {{
             e.preventDefault();
             const btn = document.getElementById('s4-save-btn');
-            btn.textContent = '{_t("onboarding.s4_saving", lang)}';
+            btn.textContent = '{_t_js("onboarding.s4_saving", lang)}';
             btn.disabled = true;
             try {{
                 await apiCall('POST', '/api/recipients', {{
@@ -2094,7 +2100,7 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
                 }});
                 obRecipientsCount++;
                 const successEl = document.getElementById('s4-success');
-                successEl.textContent = '{_t("onboarding.s4_saved", lang)}';
+                successEl.textContent = '{_t_js("onboarding.s4_saved", lang)}';
                 successEl.style.display = 'block';
                 setTimeout(() => successEl.style.display = 'none', 5000);
                 document.getElementById('s4-form').reset();
@@ -2102,14 +2108,14 @@ def _onboarding_page(user, secrets_count: int, recipients_count: int, lang: str 
             }} catch (err) {{
                 showAlert('ob-alert', err.message, true);
             }}
-            btn.textContent = '{_t("onboarding.s4_save", lang)}';
+            btn.textContent = '{_t_js("onboarding.s4_save", lang)}';
             btn.disabled = false;
         }}
 
         // ---- Step 5: Done ----
         function setupStep5() {{
-            const secretWord = obSecretsCount === 1 ? '{_t("onboarding.s5_secret", lang)}' : '{_t("onboarding.s5_secrets", lang)}';
-            const recipientWord = obRecipientsCount === 1 ? '{_t("onboarding.s5_recipient", lang)}' : '{_t("onboarding.s5_recipients", lang)}';
+            const secretWord = obSecretsCount === 1 ? '{_t_js("onboarding.s5_secret", lang)}' : '{_t_js("onboarding.s5_secrets", lang)}';
+            const recipientWord = obRecipientsCount === 1 ? '{_t_js("onboarding.s5_recipient", lang)}' : '{_t_js("onboarding.s5_recipients", lang)}';
             document.getElementById('done-secret-text').textContent = obSecretsCount + ' ' + secretWord;
             document.getElementById('done-recipient-text').textContent = obRecipientsCount + ' ' + recipientWord;
 
